@@ -16,6 +16,7 @@ import {
   parseSession,
   pickLang,
   recheckEvery,
+  renamedBeforeNaming,
   sanitizeTitle,
 } from './logic'
 import type { Lang, NameKind, Verdict } from './logic'
@@ -56,6 +57,8 @@ type Pending = {
   lang: Lang
   /** 첫 사용자 메시지(모르면 null). 그사이 앱이 첫 마디 이름을 붙였는지 가릴 때 쓴다. */
   firstMessage: string | null
+  /** 이 건을 만든 뒤 /session-name off 를 했는가. now 로 시킨 건도 off 하면 버린다. */
+  cancelled: () => boolean
 }
 
 type LooseResult = {
@@ -248,8 +251,12 @@ async function applyTitle($: EngineInterface, raw: string, p: Pending): Promise<
       await log($, 'skip', { reason: 'bad-title' })
       return
     }
+    if (p.cancelled()) {
+      await log($, 'skip', { reason: 'turned-off' })
+      return
+    }
     const st = await readState($)
-    // Haiku 를 기다리는 사이 /session-name off 를 했으면 붙이지 않는다(now 는 사람이 시킨 것이라 붙인다).
+    // 꺼진 세션이면 붙이지 않는다. 꺼진 뒤에 사람이 now 로 시킨 건만 붙인다(그 뒤 off 는 위 cancelled 가 막는다).
     if (st.off !== null && !forced) {
       await log($, 'skip', { reason: 'turned-off' })
       return
@@ -392,6 +399,9 @@ export const register: Register = (on, options) => {
   let pending: Pending | null = null
   // 첫 사용자 메시지는 한 번 찾으면 바뀌지 않는다.
   let firstMessage: string | null = null
+  // /session-name off 를 할 때마다 1 올린다. 그 전에 만든 이름 짓기 건(now 포함)은 붙이지 않는다.
+  let offCount = 0
+  const cancelledAfter = (n: number) => () => offCount !== n
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -437,6 +447,19 @@ export const register: Register = (on, options) => {
         }
         // 첫 메시지가 아직 기록에 없으면(이 메시지가 처음) 지금 메시지가 첫 메시지다.
         firstKnown = first === false ? null : (first ?? e.text)
+        // 모드가 짓기 전에 사람이 "DB"처럼 짧은 이름으로 바꿨으면, 짧다고 덮어쓰지 않는다.
+        if (
+          renamedBeforeNaming({
+            title: cur.title,
+            lastSeenTitle: st.lastSeenTitle,
+            lastTitle: st.lastTitle,
+            firstMessage: firstKnown,
+          })
+        ) {
+          await patch($, s => ({ ...s, off: 'user-renamed' }))
+          await log($, 'off', { reason: 'user-renamed' })
+          return next(e)
+        }
         verdict = judge({
           title: cur.title,
           firstMessage: firstKnown,
@@ -459,7 +482,15 @@ export const register: Register = (on, options) => {
       if (!queue) return next(e)
 
       const kind: NameKind = forced ? 'now' : verdict === 'stale' ? 'stale' : verdict === 'short' ? 'short' : 'first'
-      pending = { kind, currentTitle: cur.title, userText: e.text, forced, lang, firstMessage: firstKnown }
+      pending = {
+        kind,
+        currentTitle: cur.title,
+        userText: e.text,
+        forced,
+        lang,
+        firstMessage: firstKnown,
+        cancelled: cancelledAfter(offCount),
+      }
       // 이름을 안 지어도 다시 점검 간격만큼 뒤에 보게 한다(매번 짓지 않게).
       if (verdict === 'stale') await patch($, s => ({ ...s, promptsSinceSet: 0 }))
       await log($, 'queue', { title: cur.title, reason: kind })
@@ -494,8 +525,9 @@ export const register: Register = (on, options) => {
     const arg = e.args.trim().toLowerCase()
     const t = TEXT[lang]
     if (arg === 'off') {
-      // 이번 턴 끝에 지으려고 예약해 둔 것도 버린다.
+      // 이번 턴 끝에 지으려고 예약해 둔 것도, 이미 Haiku 를 기다리는 것(now 포함)도 버린다.
       pending = null
+      offCount++
       await patch($, s => ({ ...s, off: 'manual', forceNext: false }))
       return { text: t.off }
     }
@@ -532,7 +564,15 @@ export const register: Register = (on, options) => {
       const l = pickLang(langOption, ex.user, lang)
       void nameWithModel(
         $,
-        { kind: 'now', currentTitle: cur.title, userText: ex.user, forced: true, lang: l, firstMessage },
+        {
+          kind: 'now',
+          currentTitle: cur.title,
+          userText: ex.user,
+          forced: true,
+          lang: l,
+          firstMessage,
+          cancelled: cancelledAfter(offCount),
+        },
         ex.answer,
       ).catch(() => {})
       return { text: t.now }

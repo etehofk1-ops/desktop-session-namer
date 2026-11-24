@@ -65,14 +65,30 @@ export function sanitizeTitle(raw: string): string | null {
   return t
 }
 
-// 사이드바 이름은 화면 공유·캡처에 그대로 보인다. 키·메일 주소처럼 보이는 이름은 쓰지 않는다.
-const KEY_PREFIX = /(?:^|[^A-Za-z0-9])(?:sk-|sk_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abposr]-|AKIA|AIza)/
-const EMAIL = /[^\s@]+@[^\s@]+\.[^\s@]+/
+// 키·토큰·메일 주소처럼 보이는 글. 이름에 들어가면 버리고, Haiku 에 보내는 발췌에서는 가린다.
+// 이름은 화면 공유·캡처에 그대로 보인다. 발췌를 가려 두면 그런 글이 든 대화도 이름을 버리지 않고 짓는다.
+const KEY_RE = /(?<![A-Za-z0-9])(?:sk-|sk_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abposr]-|AKIA|AIza|eyJ)[A-Za-z0-9_.-]*/g
+const EMAIL_RE = /[^\s@<>()"'`]+@[^\s@<>()"'`]+\.[A-Za-z]{2,}/g
+/** 16자 이상 한 덩어리(-·/·. 로 끊음). 글자와 숫자가 섞여 있으면 키·해시로 본다. */
+const LONG_RE = /[A-Za-z0-9_+=]{16,}/g
+const MASK = '[redacted]'
 
-/** 이름에 키·토큰·메일 주소처럼 보이는 글이 있는가. 16자 이상 한 덩어리에 글자와 숫자가 섞이면 키로 본다. */
+function isKeyLike(w: string): boolean {
+  return /\d/.test(w) && /[A-Za-z]/.test(w)
+}
+
+/** 이름에 키·토큰·메일 주소처럼 보이는 글이 있는가. */
 export function looksSensitive(title: string): boolean {
-  if (KEY_PREFIX.test(title) || EMAIL.test(title)) return true
-  return title.split(/\s+/).some(w => [...w].length >= 16 && /\d/.test(w) && /[A-Za-z]/.test(w))
+  if (title.match(KEY_RE) !== null || title.match(EMAIL_RE) !== null) return true
+  return (title.match(LONG_RE) ?? []).some(isKeyLike)
+}
+
+/** Haiku 에 보내기 전에 키·토큰·메일 주소처럼 보이는 글을 [redacted] 로 바꾼다. */
+export function maskSensitive(text: string): string {
+  return text
+    .replace(KEY_RE, MASK)
+    .replace(EMAIL_RE, MASK)
+    .replace(LONG_RE, w => (isKeyLike(w) ? MASK : w))
 }
 
 /** 도구 호출 자체가 오류·거부인가(본문 글은 보지 않는다). get_session 처럼 본문에 제목이 든 결과에 쓴다. */
@@ -182,6 +198,23 @@ export function checkBeforeSet(args: {
   return isAutoTitle(now, firstMessage) !== null ? 'apply' : 'renamed'
 }
 
+/**
+ * 모드가 아직 이름을 지은 적이 없는데(lastTitle null), 지난 메시지 때 본 이름(lastSeenTitle)과
+ * 지금 이름이 다르고, 지금 이름이 첫 마디 이름도 아니면 사람이 바꾼 것이다.
+ * "DB"처럼 짧은 이름도 사람이 정했으면 덮어쓰지 않는다. 첫 메시지를 모르면(null) 가리지 못하니 false.
+ */
+export function renamedBeforeNaming(args: {
+  title: string
+  lastSeenTitle: string | null
+  lastTitle: string | null
+  firstMessage: string | null
+}): boolean {
+  const { title, lastSeenTitle, lastTitle, firstMessage } = args
+  if (lastTitle !== null || lastSeenTitle === null || firstMessage === null) return false
+  if (title === lastSeenTitle) return false
+  return isAutoTitle(title, firstMessage) !== 'first'
+}
+
 export type NameKind = 'first' | 'short' | 'stale' | 'now'
 
 /** 이름 오래됨 점검 간격 기본값(메시지 수). 0 이면 점검하지 않는다. */
@@ -205,18 +238,21 @@ export type Lang = 'ko' | 'en'
 export type LangOption = 'auto' | Lang
 
 const HANGUL = /[ᄀ-ᇿ㄰-㆏ꥠ-꥿가-힯ힰ-퟿]/u
-const LATIN = /\p{Script=Latin}/u
+const LETTER = /\p{L}/u
 
 /** 한글 음절·호환 자모·첫가끝 자모가 하나라도 있는가. */
 export function hasHangul(text: string | null | undefined): boolean {
   return typeof text === 'string' && HANGUL.test(text)
 }
 
-/** 쓸 언어를 정한다. 'ko'·'en' 은 그대로, 'auto' 는 글에서 읽고 판단이 안 서면 fallback. */
+/**
+ * 쓸 언어를 정한다. 'ko'·'en' 은 그대로. 'auto' 는 한글이 있으면 한국어, 한글은 없고 다른 글자
+ * (영문·일본어 등)가 있으면 영어다(README 대로). 글자가 없으면(숫자·기호뿐) fallback.
+ */
 export function pickLang(option: unknown, text: string | null | undefined, fallback: Lang): Lang {
   if (option === 'ko' || option === 'en') return option
   if (hasHangul(text)) return 'ko'
-  if (typeof text === 'string' && LATIN.test(text)) return 'en'
+  if (typeof text === 'string' && LETTER.test(text)) return 'en'
   return fallback
 }
 
@@ -268,8 +304,8 @@ export function buildNamingRequest(
       system += ` 지금 이름은 «${currentTitle}»이다. 더 맞는 새 이름을 짓는다.`
     }
   }
-  const u = stripTags(excerpt(userText, USER_EXCERPT))
-  const a = stripTags(excerpt(answer, ANSWER_EXCERPT)).trim()
+  const u = maskSensitive(stripTags(excerpt(userText, USER_EXCERPT)))
+  const a = maskSensitive(stripTags(excerpt(answer, ANSWER_EXCERPT))).trim()
   const lines = ['<conversation>', '[user]', u]
   if (a !== '') lines.push('[assistant]', a)
   lines.push('</conversation>')

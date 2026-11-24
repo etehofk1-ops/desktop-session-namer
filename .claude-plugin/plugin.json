@@ -1,6 +1,6 @@
 {
   "name": "session-namer",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "license": "MIT",
   "author": { "name": "etehofk1-ops" },
   "description": "Renames Claude desktop app sidebar sessions to match the conversation topic, using one small Haiku call per naming.",
@@ -16,7 +16,7 @@
     "language": {
       "type": "string",
       "title": "Title language / 이름 언어",
-      "description": "auto: follow the language of your messages (Korean if it has Hangul, English if Latin letters). ko: always Korean. en: always English. / auto는 메시지 언어를 따라가고(한글이 있으면 한국어, 영문이면 영어), ko는 항상 한국어, en은 항상 영어로 이름을 짓습니다.",
+      "description": "auto: follow the language of your messages (Korean if it has Hangul, English otherwise). ko: always Korean. en: always English. / auto는 메시지 언어를 따라가고(한글이 있으면 한국어, 없으면 영어), ko는 항상 한국어, en은 항상 영어로 이름을 짓습니다.",
       "options": ["auto", "ko", "en"],
       "default": "auto"
     }

@@ -15,11 +15,11 @@ In the Claude desktop app (Code tab), a session's sidebar title often stays stuc
   - Messages of four characters or fewer, like "hi" or "ok", have no topic, so they are skipped.
 - When the reply finishes, the mod sends Haiku the first 1,000 characters of your message and the first 800 characters of the reply in one low-effort call, and asks for a title. It renames the session with the app's `set_session_title` tool. A toast tells you the new title.
 - Nothing is added to your conversation. Claude never sees a hint and never writes a hidden line.
-- Haiku gets only those two excerpts, sent to Anthropic through your session's own login. Nothing goes anywhere else. If the title Haiku returns contains something that looks like a key, a token or an email address, the mod does not use it.
+- Haiku gets only those two excerpts, sent to Anthropic through your session's own login. Nothing goes anywhere else. Before sending, the mod replaces anything in the excerpts that looks like a key, a token or an email address with `[redacted]`. If the title Haiku returns still contains something like that, the mod does not use it.
 - After it names a session, the mod asks Haiku again every 30 messages whether the conversation has moved on to something else. Haiku answers KEEP unless the topic changed. You can change the interval, or set it to 0 to turn this off.
 - Titles follow the language of the conversation, English or Korean (setting `language`).
 - The mod stays out of the way when:
-  - you have renamed the session yourself (it turns itself off for that session). The mod reads the title once more right before renaming, so a title you change during a long task is not overwritten when the task ends,
+  - you have renamed the session yourself (it turns itself off for that session), even to a short title like "DB" before the mod has named it. The mod reads the title once more right before renaming, so a title you change during a long task is not overwritten when the task ends,
   - the session is a scheduled task,
   - the message came from another session rather than from you.
 
@@ -35,7 +35,7 @@ Measured on November 25, 2026 with Claude Code 2.1.325 (`claude -p`) and Haiku 5
 | First title, long Korean chat (excerpts at their limit) | 2,126 | 21–30 | about $0.00023 |
 
 - A call takes about 0.9 seconds. It runs after the reply has finished, so you never wait for it.
-- The excerpts stop at 1,000 and 800 characters, and Haiku's reply is cut off at 1,024 tokens. The most expensive measured call was the $0.00023 above. Even a reply that ran all the way to the cutoff would bring a long Korean chat's call to about $0.0007.
+- The excerpts stop at 1,000 and 800 characters, and Haiku's reply is cut off at 1,024 tokens. The most expensive measured call was the $0.00023 above. A reply that ran all the way to the cutoff would bring a long Korean chat's call to about $0.0007. The excerpts are cut by characters, not tokens, so text that takes more tokens per character than Korean, such as a long run of emoji, can cost more. That case was not measured.
 - Most sessions need a single call. A 100-message session needs four (one title and three rechecks), which comes to under $0.001 at the measured costs.
 - The call goes through your session's own Claude Code login, so no API key is needed. It counts toward the session's cost total like any other request.
 - Before 0.5.0, the conversation's own model wrote the title as a hidden line in its reply. At the same list prices that came to about $0.0006 (Sonnet 5.5) to $0.0021 (Fable 5.2) per title, so the Haiku call is roughly 3 to 57 times cheaper.
@@ -77,7 +77,7 @@ You don't need any of these for normal use.
 | --- | --- |
 | `/session-name` | Show the status, the current verdict, Haiku calls and tokens used in this session, and recent activity |
 | `/session-name now` | Name the session again right away from the latest exchange |
-| `/session-name off` | Turn it off for this session |
+| `/session-name off` | Turn it off for this session. A rename still waiting on Haiku, including one from `now`, is dropped |
 | `/session-name on` | Turn it back on. The current title becomes the new baseline and is rechecked every 30 messages |
 
 ## Settings
@@ -85,7 +85,7 @@ You don't need any of these for normal use.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `recheckEvery` | 30 | How many messages after naming before it checks the title again. 0 turns rechecking off. |
-| `language` | `auto` | Title language. `auto` uses Korean if your message contains Hangul and English otherwise. Set `en` or `ko` to fix it. |
+| `language` | `auto` | Title language. `auto` uses Korean if your message contains Hangul and English otherwise, Japanese or Chinese messages included. Set `en` or `ko` to fix it. |
 
 ## Limitations
 

@@ -14,12 +14,14 @@ import {
   isToolError,
   isTrivialMessage,
   judge,
+  maskSensitive,
   normTitle,
   normalizeState,
   parseNamingReply,
   parseSession,
   pickLang,
   recheckEvery,
+  renamedBeforeNaming,
   sanitizeTitle,
 } from '../hooks/logic'
 
@@ -75,6 +77,13 @@ test('hasHangul: 음절·호환 자모·첫가끝 자모 중 하나라도 있으
   expect(hasHangul(undefined)).toBe(false)
 })
 
+test('pickLang: 한글이 없고 글자가 있으면(일본어·중국어·키릴 포함) en', async () => {
+  expect(pickLang('auto', '日本語のバグを直して', 'ko')).toBe('en')
+  expect(pickLang('auto', '修复登录错误', 'ko')).toBe('en')
+  expect(pickLang('auto', 'Исправить ошибку входа', 'ko')).toBe('en')
+  expect(pickLang('auto', '日本語と한국어', 'en')).toBe('ko')
+})
+
 test('pickLang: ko·en 은 그대로, auto 는 한글 → ko, 라틴 → en, 아니면 fallback', async () => {
   expect(pickLang('ko', 'Hello there', 'en')).toBe('ko')
   expect(pickLang('en', '안녕하세요', 'ko')).toBe('en')
@@ -126,6 +135,41 @@ test('checkBeforeSet: 그대로면 apply, 앱이 첫 마디 이름을 붙였으�
   expect(
     checkBeforeSet({ now: '앨범 공유 개선', expected: '사진 앨범 공유', lastTitle: '앨범 공유 개선', firstMessage: first }),
   ).toBe('skip')
+})
+
+test('maskSensitive: 키·토큰·메일 주소·키 같은 긴 글자열만 가리고 보통 글은 둔다', async () => {
+  expect(maskSensitive('sk-ant-api03-abcDEF123 키로 접속 안 됨')).toBe('[redacted] 키로 접속 안 됨')
+  expect(maskSensitive('토큰 ghp_abcdEFGH1234 를 바꿨다')).toBe('토큰 [redacted] 를 바꿨다')
+  expect(maskSensitive('me@example.com 으로 알림')).toBe('[redacted] 으로 알림')
+  expect(maskSensitive('해시 a1b2c3d4e5f6a7b8c9 확인')).toBe('해시 [redacted] 확인')
+  for (const t of [
+    'github.com/example/desktop-session-namer 저장소',
+    'session-namer-v5.0-2026-11-25 백업',
+    'Internationalization setup',
+    'SHA256 checksum mismatch',
+    'task-runner 설정',
+    '로그인 오류 원인 찾기',
+  ]) {
+    expect(maskSensitive(t)).toBe(t)
+  }
+})
+
+test('renamedBeforeNaming: 모드가 짓기 전에 사람이 이름을 바꿨는가', async () => {
+  const first = '사진 앨범 공유 페이지 만들자'
+  const base = { lastTitle: null, firstMessage: 'ㅎㅇ' }
+  // 그대로
+  expect(renamedBeforeNaming({ ...base, title: 'ᄒᄋ', lastSeenTitle: 'ᄒᄋ' })).toBe(false)
+  // 짧은 이름으로 바꿨다(짧다고 덮어쓰면 안 된다)
+  expect(renamedBeforeNaming({ ...base, title: 'DB', lastSeenTitle: 'ᄒᄋ' })).toBe(true)
+  // 앱이 자리 이름을 첫 마디로 바꿨다(자른 것 포함)
+  expect(renamedBeforeNaming({ lastTitle: null, firstMessage: first, title: first, lastSeenTitle: '새 창' })).toBe(false)
+  expect(renamedBeforeNaming({ lastTitle: null, firstMessage: first, title: '사진 앨범', lastSeenTitle: '새 창' })).toBe(
+    false,
+  )
+  // 처음 보거나, 모드가 이미 지었거나(judge 가 본다), 첫 메시지를 모르면 판단하지 않는다
+  expect(renamedBeforeNaming({ ...base, title: 'DB', lastSeenTitle: null })).toBe(false)
+  expect(renamedBeforeNaming({ ...base, title: 'DB', lastSeenTitle: 'ᄒᄋ', lastTitle: '앨범' })).toBe(false)
+  expect(renamedBeforeNaming({ ...base, title: 'DB', lastSeenTitle: 'ᄒᄋ', firstMessage: null })).toBe(false)
 })
 
 test('sanitizeTitle: 끝 괄호는 남긴다', async () => {
@@ -278,6 +322,19 @@ test('buildNamingRequest: prompt 모양·발췌 자르기·conversation 태그 �
   const empty = buildNamingRequest('first', 'ko', 't', '사용자 글', '   ')
   expect(empty.prompt).toBe('<conversation>\n[user]\n사용자 글\n</conversation>')
   expect(empty.prompt.includes('[assistant]')).toBe(false)
+})
+
+test('buildNamingRequest: Haiku 로 보내는 발췌에서 키·메일 주소를 가린다', async () => {
+  const r = buildNamingRequest(
+    'first',
+    'ko',
+    't',
+    'sk-ant-api03-abcDEF123 키로 접속이 안 돼. me@example.com 으로 알림도 안 와',
+    '토큰 ghp_abcdEFGH1234 를 새로 만들어 보세요',
+  )
+  expect(r.prompt).toContain('[redacted] 키로 접속이 안 돼')
+  expect(r.prompt).toContain('토큰 [redacted] 를')
+  for (const s of ['sk-ant', 'me@example.com', 'ghp_']) expect(r.prompt.includes(s)).toBe(false)
 })
 
 test('parseNamingReply: SKIP·KEEP·이름·빈 글', async () => {
@@ -929,6 +986,51 @@ test('on: 첫 마디 이름이면 기준을 비워 다음 메시지에서 짓고
   await turn($, '앨범 공유 페이지 다시 시도')
   expect(r.calls.length).toBe(4)
   expect((await cmd($, '')).split('\n')[0]).toContain('켜짐')
+})
+
+// ---------- 0.5.2: 짓기 전 짧은 이름, now 뒤 off ----------
+
+test('모드가 짓기 전에 사람이 짧은 이름으로 바꾸면 덮어쓰지 않고 끈다', async ($, on) => {
+  let title = 'ᄒᄋ'
+  const r = await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
+  await turn($, 'ㅇㅋ') // 짧은 말이라 아직 안 짓는다
+  title = 'DB' // 사이드바에서 짧게 바꿨다
+  await turn($, '데이터베이스 색인을 정리하자')
+  expect(r.calls.length).toBe(0)
+  expect(r.sets).toEqual([])
+  expect(await cmd($, '')).toContain('꺼짐 (user-renamed)')
+})
+
+test('앱이 자리 이름을 첫 마디로 바꾼 것은 사람이 바꾼 것으로 보지 않는다', async ($, on) => {
+  let title = '새 창'
+  const history: string[] = []
+  const r = await rig($, on, { title: () => title, history })
+  await turn($, 'ㅇㅋ')
+  history.push('ㅇㅋ')
+  title = 'ㅇㅋ' // 앱이 첫 메시지로 이름을 붙였다
+  await turn($, '사진 앨범 공유 페이지 만들자')
+  expect(r.calls.length).toBe(1)
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+})
+
+test('now 를 시킨 뒤 Haiku 를 기다리는 사이 off 하면 붙이지 않고, off 뒤에 시킨 now 는 붙인다', async ($, on) => {
+  const r = await rig($, on, {
+    title: () => 'ᄒᄋ',
+    history: ['사진 앨범 공유 페이지 만들자'],
+    answers: ['네, 앨범 목록부터 만들겠습니다.'],
+    reply: n => {
+      if (n === 0) void cmd($, 'off') // 답이 돌아오는 사이 사람이 끈다
+      return ans('사진 앨범 공유 페이지')
+    },
+  })
+  await cmd($, 'now')
+  expect(r.calls.length).toBe(1)
+  expect(r.sets).toEqual([])
+  expect(await cmd($, '')).toContain('skip (turned-off)')
+  // 끈 뒤에 사람이 직접 now 를 시키면 그건 붙인다.
+  await cmd($, 'now')
+  expect(r.calls.length).toBe(2)
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
 })
 
 test('앱이 거절하면 이 세션에서는 끈다', async ($, on) => {
