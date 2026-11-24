@@ -24,16 +24,17 @@ In the Claude desktop app (Code tab), a session's sidebar title often stays stuc
 
 ## How it differs from similar tools
 
-Several tools already name sessions automatically.
+Several tools already name sessions automatically. This is how they compare (checked November 2026).
 
-- Most call a second model (Haiku or Sonnet) to come up with the title, and they rename the session in the terminal CLI.
-- One handles the desktop sidebar, but it has Claude call a rename tool in the middle of its reply.
+| | This mod | CLI namers ([sorrycc/session-namer](https://github.com/sorrycc/session-namer), [sathwick-p/claude-rename](https://github.com/sathwick-p/claude-rename)) | [Shepherd-Creative gist](https://gist.github.com/Shepherd-Creative/4b723ba2261292a58bcc931aff7c0b3e) |
+| --- | --- | --- | --- |
+| Where the title shows | Desktop app sidebar | `claude --resume` list | Desktop app sidebar |
+| How the title is made | One hidden line in the reply Claude writes anyway | A separate `claude -p` call (Haiku or Sonnet) | Built from the git repo and branch; Claude makes one extra tool call |
+| Renames when the topic changes | Yes, checks every 30 messages | sorrycc every 5 turns; claude-rename names once | No, the name stays fixed |
 
-This mod is different in three ways:
+Renaming in the desktop sidebar has been checked in a real desktop session. A title you set yourself is never overwritten.
 
-- It makes no extra model call and no extra tool call. The title comes from a hidden line in the reply Claude writes anyway.
-- It renames the title in the desktop app's sidebar, and this has been checked in a real desktop session.
-- It renames again when the topic changes, and it never overwrites a title you set yourself.
+Since Claude Code 2.1.308, a title returned in a hook's `sessionTitle` field is reported to reach the sidebar of local desktop sessions too ([anthropics/claude-code#104473](https://github.com/anthropics/claude-code/issues/104473)). Before that it only changed the terminal side.
 
 ## Requirements
 
@@ -70,6 +71,7 @@ In a terminal:
 
 - It has not been checked whether the hidden line flashes on screen while the reply is streaming. It is removed from the saved reply.
 - If Claude ignores the hint, the title stays as it is, and the hint is attached again to your next message.
+- The mod relies on the desktop app's `ccd_session_mgmt` tools (`get_session`, `set_session_title`). They are undocumented and may change in any app update. If they stop working, the mod turns itself off for that session.
 
 ## Tests
 

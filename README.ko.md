@@ -24,16 +24,17 @@ Claude 데스크톱 앱(Code 탭) 사이드바에서 세션 이름이 "ㅎㅇ"�
 
 ## 비슷한 도구와 다른 점
 
-자동으로 세션 이름을 짓는 도구는 이미 여럿 있습니다.
+자동으로 세션 이름을 짓는 도구는 이미 여럿 있습니다. 2026년 11월에 확인한 차이는 이렇습니다.
 
-- 대부분은 Haiku나 Sonnet을 한 번 더 따로 불러 이름을 짓고, 터미널 CLI의 세션 이름을 다룹니다.
-- 데스크톱 사이드바를 다루는 것도 있습니다. 다만 Claude가 답하는 도중에 이름을 바꾸는 도구를 직접 부르는 방식입니다.
+| | 이 모드 | CLI용 도구([sorrycc/session-namer](https://github.com/sorrycc/session-namer), [sathwick-p/claude-rename](https://github.com/sathwick-p/claude-rename)) | [Shepherd-Creative gist](https://gist.github.com/Shepherd-Creative/4b723ba2261292a58bcc931aff7c0b3e) |
+| --- | --- | --- | --- |
+| 이름이 보이는 곳 | 데스크톱 앱 사이드바 | `claude --resume` 목록 | 데스크톱 앱 사이드바 |
+| 이름 짓는 법 | Claude가 원래 쓰는 답에 숨은 한 줄 | `claude -p`로 모델을 한 번 더 부름(Haiku·Sonnet) | git 저장소·브랜치 이름으로 만들고, Claude가 도구를 한 번 더 부름 |
+| 주제가 바뀌면 | 다시 지음(30메시지마다 확인) | sorrycc는 5턴마다, claude-rename은 한 번만 | 다시 짓지 않음(처음 이름 고정) |
 
-이 모드는 이렇게 다릅니다.
+데스크톱 사이드바 이름이 바뀌는 건 실제 데스크톱 세션에서 확인했습니다. 사람이 직접 바꾼 이름은 건드리지 않습니다.
 
-- 모델을 따로 부르지 않고 도구도 한 번 더 부르지 않습니다. 원래 답에 든 숨은 한 줄에서 이름을 받습니다.
-- 데스크톱 앱 사이드바 이름을 바꿉니다. 실제 데스크톱 세션에서 확인했습니다.
-- 주제가 바뀌면 다시 짓고, 사람이 바꾼 이름은 건드리지 않습니다.
+Claude Code 2.1.308부터는 훅의 `sessionTitle`로 돌려준 이름도 로컬 데스크톱 세션 사이드바에 반영된다는 보고가 있습니다([anthropics/claude-code#104473](https://github.com/anthropics/claude-code/issues/104473)). 그전에는 터미널 쪽만 바뀌었습니다.
 
 ## 필요한 것
 
@@ -70,6 +71,7 @@ Claude 데스크톱 앱(Code 탭) 사이드바에서 세션 이름이 "ㅎㅇ"�
 
 - 답이 화면에 흘러나오는 동안 이름 줄이 잠깐 보이는지는 확인하지 못했습니다. 저장되는 답에서는 지워집니다.
 - Claude가 안내를 따르지 않으면 이름이 바뀌지 않습니다. 그 경우 다음 메시지에 안내가 다시 붙습니다.
+- 데스크톱 앱의 `ccd_session_mgmt` 도구(`get_session`, `set_session_title`)에 기대어 동작합니다. 공개 문서가 없는 내부 도구라 앱 업데이트로 바뀔 수 있습니다. 도구가 동작하지 않으면 그 세션에서 모드가 스스로 꺼집니다.
 
 ## 시험
 
