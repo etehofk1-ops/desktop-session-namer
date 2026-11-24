@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import {
   buildHint,
   extractMarker,
+  hasHangul,
   isAutoTitle,
   isRefusalResult,
   isScheduledSession,
@@ -11,6 +12,7 @@ import {
   judge,
   normTitle,
   parseSession,
+  pickLang,
   recheckEvery,
   sanitizeTitle,
 } from '../hooks/logic'
@@ -42,9 +44,41 @@ test('sanitizeTitle: 너무 짧거나 길거나 비면 버린다', async () => {
   expect(sanitizeTitle('"가".')).toBeNull()
   expect(sanitizeTitle('')).toBeNull()
   expect(sanitizeTitle('   \n  ')).toBeNull()
-  expect(sanitizeTitle('가'.repeat(41))).toBeNull()
-  expect(sanitizeTitle('가'.repeat(40))).toBe('가'.repeat(40))
+  expect(sanitizeTitle('가'.repeat(61))).toBeNull()
+  expect(sanitizeTitle('가'.repeat(60))).toBe('가'.repeat(60))
   expect(sanitizeTitle('가나')).toBe('가나')
+})
+
+test('sanitizeTitle: 영어 제목은 41~60자까지 허용하고 61자는 버린다', async () => {
+  const long = 'Migrate the legacy billing service to the new payments API'
+  expect([...long].length).toBeGreaterThan(40)
+  expect(sanitizeTitle(long)).toBe(long)
+  expect(sanitizeTitle('a'.repeat(41))).toBe('a'.repeat(41))
+  expect(sanitizeTitle('a'.repeat(60))).toBe('a'.repeat(60))
+  expect(sanitizeTitle('a'.repeat(61))).toBeNull()
+})
+
+test('hasHangul: 음절·호환 자모·첫가끝 자모 중 하나라도 있으면 true', async () => {
+  expect(hasHangul('안녕')).toBe(true)
+  expect(hasHangul('ㅎㅇ')).toBe(true)
+  expect(hasHangul('ᄒᄋ')).toBe(true)
+  expect(hasHangul('fix the 버그 please')).toBe(true)
+  expect(hasHangul('Hello, world 123')).toBe(false)
+  expect(hasHangul('日本語')).toBe(false)
+  expect(hasHangul('')).toBe(false)
+  expect(hasHangul(undefined)).toBe(false)
+})
+
+test('pickLang: ko·en 은 그대로, auto 는 한글 → ko, 라틴 → en, 아니면 fallback', async () => {
+  expect(pickLang('ko', 'Hello there', 'en')).toBe('ko')
+  expect(pickLang('en', '안녕하세요', 'ko')).toBe('en')
+  expect(pickLang('auto', '안녕하세요', 'en')).toBe('ko')
+  expect(pickLang('auto', 'Fix the login bug', 'ko')).toBe('en')
+  expect(pickLang('auto', 'Fix the 로그인 bug', 'en')).toBe('ko')
+  expect(pickLang('auto', '12345 !!!', 'ko')).toBe('ko')
+  expect(pickLang('auto', '12345 !!!', 'en')).toBe('en')
+  expect(pickLang('auto', '', 'en')).toBe('en')
+  expect(pickLang(undefined, 'Fix the login bug', 'ko')).toBe('en')
 })
 
 test('sanitizeTitle: 끝 괄호는 남긴다', async () => {
@@ -209,12 +243,36 @@ test('buildHint: 어느 종류든 170자 이하(토큰 절약을 못 박는다)'
   }
 })
 
+test('buildHint en: 세 종류 모두 형식·300자 이하·규칙 문구', async () => {
+  for (const kind of ['first', 'short'] as const) {
+    const h = buildHint('hi', kind, 'en')
+    expect(h).toContain('«hi»')
+    expect(h).toContain('<!-- session-title:')
+    expect(h).toContain('Unless')
+    expect(h).toContain('under 40 characters')
+    expect(h.length).toBeLessThanOrEqual(300)
+  }
+  const s = buildHint('Photo album sharing', 'stale', 'en')
+  expect(s).toContain('«Photo album sharing»')
+  expect(s).toContain('<!-- session-title:')
+  expect(s).toContain('Only if')
+  expect(s.length).toBeLessThanOrEqual(300)
+  const n = buildHint('hi', 'now', 'en')
+  expect(n).toContain('«hi»')
+  expect(n).toContain('<!-- session-title:')
+  expect(n.includes('Unless')).toBe(false)
+  expect(n.includes('Only if')).toBe(false)
+  expect(n.length).toBeLessThanOrEqual(300)
+  // 한국어 판은 lang 을 빼면 그대로다.
+  expect(buildHint('ᄒᄋ', 'first')).toBe(buildHint('ᄒᄋ', 'first', 'ko'))
+})
+
 // ---------- 통합: 앱 도구를 가짜로 세운다 ----------
 
 const GET = 'mcp__ccd_session_mgmt__get_session'
 const SET = 'mcp__ccd_session_mgmt__set_session_title'
 
-type Rig = { sets: string[]; gets: number; models: number; rows: any[] }
+type Rig = { sets: string[]; gets: number; models: number; rows: any[]; toasts: string[] }
 
 type RigOpts = {
   title: () => string
@@ -228,11 +286,14 @@ type RigOpts = {
 }
 
 async function rig($: any, on: any, opts: RigOpts): Promise<Rig> {
-  const r: Rig = { sets: [], gets: 0, models: 0, rows: [] }
+  const r: Rig = { sets: [], gets: 0, models: 0, rows: [], toasts: [] }
   on('command.register', () => ({ value: { command: 'session-name' } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: unknown, e: any) => ({ text: e.text, context: e.context }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_: unknown, e: any) => {
+    r.toasts.push(e.text)
+    return { value: undefined }
+  })
   on('session.messages', () => {
     if (opts.messagesDeny) return { value: { deny: 'no rows' } }
     return { value: (opts.history ?? []).map(t => ({ role: 'user', text: t, toolUses: [] })) }
@@ -550,4 +611,71 @@ test('상태: 지금 판정과 최근 기록을 보여 준다', async ($, on) =>
   expect(s).toContain('첫 마디 이름')
   expect(s).toContain('마지막으로 정한 이름: 없음')
   expect(await cmd($, 'zzz')).toContain('쓰는 법')
+})
+
+// ---------- 언어(영어) ----------
+
+const EN_FIRST = 'Photo album sharing page, please'
+
+test('auto: 영어 메시지 → 영어 안내', async ($, on) => {
+  await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
+  const ctx = (await say($, EN_FIRST)).join('\n')
+  expect(ctx).toContain('«Photo album»')
+  expect(ctx).toContain('Unless the message is only a greeting')
+  expect(ctx.includes('반드시')).toBe(false)
+})
+
+test('language ko: 영어 메시지에도 한국어 안내', { options: { language: 'ko' } }, async ($, on) => {
+  await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
+  const ctx = (await say($, EN_FIRST)).join('\n')
+  expect(ctx).toContain('반드시')
+  expect(ctx.includes('Unless')).toBe(false)
+})
+
+test('language en: 한국어 메시지에도 영어 안내', { options: { language: 'en' } }, async ($, on) => {
+  await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
+  const ctx = (await say($, '사진 앨범 공유 페이지 만들자')).join('\n')
+  expect(ctx).toContain('Unless the message is only a greeting')
+  expect(ctx.includes('반드시')).toBe(false)
+})
+
+test('영어 대화에서 이름이 바뀌면 알림이 영어', async ($, on) => {
+  const r = await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
+  await say($, EN_FIRST)
+  await answer($, '<!-- session-title: Photo album sharing page -->\nSure, starting now.')
+  expect(r.sets).toEqual(['Photo album sharing page'])
+  expect(r.toasts).toEqual(['Session title → Photo album sharing page'])
+})
+
+test('한국어 대화에서 이름이 바뀌면 알림이 한국어', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
+  await say($, '앨범 공유 페이지 시작하자')
+  await answer($, '<!-- session-title: 사진 앨범 공유 페이지 -->\n본문')
+  expect(r.toasts).toEqual(['세션 이름 → 사진 앨범 공유 페이지'])
+})
+
+test('상태 명령은 마지막 언어로 영어 출력', async ($, on) => {
+  await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
+  await say($, EN_FIRST)
+  const s = await cmd($, '')
+  expect(s).toContain('Status: on')
+  expect(s).toContain('Current verdict: first-message title («Photo album»)')
+  expect(s).toContain('Last title set: none')
+  expect(s).toContain('Recent history:')
+  expect(await cmd($, 'zzz')).toContain('Usage:')
+  expect(await cmd($, 'now')).toContain('once')
+  expect(await cmd($, 'off')).toContain('off for this session')
+  expect(await cmd($, 'on')).toContain('back on')
+})
+
+test('41자 영어 제목이 실제로 적용되고 61자는 버려진다', async ($, on) => {
+  const r = await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
+  await say($, EN_FIRST)
+  const t41 = 'Migrate the legacy billing service to API'
+  expect([...t41].length).toBeGreaterThan(40)
+  await answer($, `<!-- session-title: ${t41} -->\nok`)
+  expect(r.sets).toEqual([t41])
+  await say($, 'Next, please look at the second task now')
+  await answer($, `<!-- session-title: ${'b'.repeat(61)} -->\nok`)
+  expect(r.sets).toEqual([t41])
 })

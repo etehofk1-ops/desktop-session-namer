@@ -11,10 +11,11 @@ import {
   isTrivialMessage,
   judge,
   parseSession,
+  pickLang,
   recheckEvery,
   sanitizeTitle,
 } from './logic'
-import type { HintKind, Verdict } from './logic'
+import type { HintKind, Lang, Verdict } from './logic'
 
 const GET = 'mcp__ccd_session_mgmt__get_session'
 const SET = 'mcp__ccd_session_mgmt__set_session_title'
@@ -121,17 +122,73 @@ function offReason(why: 'unavailable' | 'scheduled' | 'no-title'): string | null
   return why === 'no-title' ? null : why
 }
 
-const VERDICT_LABEL: Record<Verdict, string> = {
-  first: '첫 마디 이름',
-  short: '너무 짧은 이름',
-  stale: '모드가 지은 이름(오래됨)',
-  own: '모드가 지은 이름',
-  'user-renamed': '사용자가 바꾼 이름',
-  none: '해당 없음',
+const VERDICT_LABEL: Record<Lang, Record<Verdict, string>> = {
+  ko: {
+    first: '첫 마디 이름',
+    short: '너무 짧은 이름',
+    stale: '모드가 지은 이름(오래됨)',
+    own: '모드가 지은 이름',
+    'user-renamed': '사용자가 바꾼 이름',
+    none: '해당 없음',
+  },
+  en: {
+    first: 'first-message title',
+    short: 'too-short title',
+    stale: 'title set by the mod (getting old)',
+    own: 'title set by the mod',
+    'user-renamed': 'title changed by the user',
+    none: 'not applicable',
+  },
 }
 
+/** 알림·명령 응답 문구. */
+const TEXT = {
+  ko: {
+    toast: '세션 이름 → ',
+    commandDescription: 'Show session auto-naming status (now · on · off) / 세션 이름 자동 짓기 상태 보기',
+    off: '이 세션에서 이름 자동 짓기를 껐습니다.',
+    on: '이름 자동 짓기를 다시 켰습니다. 지금 이름을 새 기준으로 삼습니다.',
+    now: '다음 메시지에 이름 안내를 한 번 붙입니다.',
+    usage: '쓰는 법: /session-name [now|on|off]',
+    unknown: '확인 못 함',
+    scheduled: '예약 작업 세션',
+    unavailable: '이름 도구 없음',
+    unreadable: '이름을 읽지 못함',
+    status: '상태: ',
+    statusOn: '켜짐',
+    statusOff: '꺼짐',
+    queued: ', 다음 메시지에 안내 예약됨',
+    verdict: '지금 판정: ',
+    lastTitle: '마지막으로 정한 이름: ',
+    none: '없음',
+    recent: '최근 기록:',
+    nothingYet: '  아직 없음',
+  },
+  en: {
+    toast: 'Session title → ',
+    commandDescription: 'Show session auto-naming status (now · on · off) / 세션 이름 자동 짓기 상태 보기',
+    off: 'Automatic session naming is off for this session.',
+    on: 'Automatic naming is back on. The current title is the new baseline.',
+    now: 'A naming hint will be added to the next message, once.',
+    usage: 'Usage: /session-name [now|on|off]',
+    unknown: 'unknown',
+    scheduled: 'scheduled task session',
+    unavailable: 'title tool unavailable',
+    unreadable: 'could not read the title',
+    status: 'Status: ',
+    statusOn: 'on',
+    statusOff: 'off',
+    queued: ', hint queued for the next message',
+    verdict: 'Current verdict: ',
+    lastTitle: 'Last title set: ',
+    none: 'none',
+    recent: 'Recent history:',
+    nothingYet: '  none yet',
+  },
+} as const
+
 /** 표시에서 뽑은 이름을 앱 도구로 적용한다. */
-async function applyTitle($: EngineInterface, raw: string, forced: boolean): Promise<void> {
+async function applyTitle($: EngineInterface, raw: string, forced: boolean, lang: Lang): Promise<void> {
   try {
     const title = sanitizeTitle(raw)
     if (title === null) {
@@ -167,7 +224,7 @@ async function applyTitle($: EngineInterface, raw: string, forced: boolean): Pro
       off: forced && s.off === 'user-renamed' ? null : s.off,
     }))
     await log($, 'set', { title })
-    $.ui.toast('세션 이름 → ' + title)
+    $.ui.toast(TEXT[lang].toast + title)
   } catch (err) {
     try {
       await log($, 'error', { reason: errMsg(err).slice(0, 120) })
@@ -180,6 +237,9 @@ async function applyTitle($: EngineInterface, raw: string, forced: boolean): Pro
 export const register: Register = (on, options) => {
   // 이름 오래됨 점검 간격(메시지 수). 0 이면 끈다. 설정 메뉴에서 바꾸면 모듈이 다시 불러와진다.
   const every = recheckEvery(options?.['recheckEvery'])
+  // 이름·안내·알림 언어: 'auto' 면 사용자 메시지에서 읽고, 마지막으로 정한 언어를 기억한다(처음엔 ko).
+  const langOption = options?.['language']
+  let lang: Lang = pickLang(langOption, null, 'ko')
   // 이번 사용자 메시지에 안내를 붙였는가(그래야 답의 표시를 받아들인다).
   let pendingHint = false
   // 그 안내가 `/session-name now` 의 한 번이었는가.
@@ -190,7 +250,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'session-name',
-      description: '세션 이름 자동 짓기 상태 보기 (now · on · off)',
+      description: TEXT.ko.commandDescription,
       argumentHint: '[now|on|off]',
     })
     return next(e)
@@ -201,6 +261,7 @@ export const register: Register = (on, options) => {
     if (e.command !== undefined || e.isMeta) return next(e)
     pendingHint = false
     pendingForced = false
+    lang = pickLang(langOption, e.text, lang)
     try {
       const st0 = await read($, store)
       const forced = st0.forceNext
@@ -257,7 +318,7 @@ export const register: Register = (on, options) => {
       if (verdict === 'stale') await patch($, s => ({ ...s, promptsSinceSet: 0 }))
       await log($, 'hint', { title: cur.title, reason: forced ? 'now' : (verdict ?? undefined) })
       const kind: HintKind = forced ? 'now' : verdict === 'stale' ? 'stale' : verdict === 'short' ? 'short' : 'first'
-      return next({ ...e, context: [...(e.context ?? []), buildHint(cur.title, kind)] })
+      return next({ ...e, context: [...(e.context ?? []), buildHint(cur.title, kind, lang)] })
     } catch (err) {
       pendingHint = false
       try {
@@ -297,31 +358,33 @@ export const register: Register = (on, options) => {
     if (found !== null && pendingHint) {
       const raw = found
       const forced = pendingForced
+      const lg = lang
       pendingHint = false
       // 기다리지 않고 뒤에서 한다. 예외는 모두 잡는다.
-      void applyTitle($, raw, forced).catch(() => {})
+      void applyTitle($, raw, forced, lg).catch(() => {})
     }
     return result
   })
 
   on('command.run', { command: 'session-name' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
+    const t = TEXT[lang]
     if (arg === 'off') {
       await patch($, s => ({ ...s, off: 'manual', forceNext: false }))
-      return { text: '이 세션에서 이름 자동 짓기를 껐습니다.' }
+      return { text: t.off }
     }
     if (arg === 'on') {
       await patch($, s => ({ ...s, off: null, lastTitle: null, promptsSinceSet: 0 }))
-      return { text: '이름 자동 짓기를 다시 켰습니다. 지금 이름을 새 기준으로 삼습니다.' }
+      return { text: t.on }
     }
     if (arg === 'now') {
       await patch($, s => ({ ...s, forceNext: true }))
-      return { text: '다음 메시지에 이름 안내를 한 번 붙입니다.' }
+      return { text: t.now }
     }
-    if (arg !== '') return { text: '쓰는 법: /session-name [now|on|off]' }
+    if (arg !== '') return { text: t.usage }
 
     const st = await read($, store)
-    let judged = '확인 못 함'
+    let judged: string = t.unknown
     const cur = await readCurrentTitle($)
     if (cur.ok) {
       let first: string | null | false = firstMessage
@@ -333,17 +396,17 @@ export const register: Register = (on, options) => {
         promptsSinceSet: st.promptsSinceSet,
         recheckEvery: every,
       })
-      judged = `${VERDICT_LABEL[v]} («${cur.title}»)`
+      judged = `${VERDICT_LABEL[lang][v]} («${cur.title}»)`
     } else {
-      judged = cur.why === 'scheduled' ? '예약 작업 세션' : cur.why === 'unavailable' ? '이름 도구 없음' : '이름을 읽지 못함'
+      judged = cur.why === 'scheduled' ? t.scheduled : cur.why === 'unavailable' ? t.unavailable : t.unreadable
     }
     const lines = [
-      `상태: ${st.off === null ? '켜짐' : `꺼짐 (${st.off})`}${st.forceNext ? ', 다음 메시지에 안내 예약됨' : ''}`,
-      `지금 판정: ${judged}`,
-      `마지막으로 정한 이름: ${st.lastTitle ?? '없음'}`,
-      '최근 기록:',
+      `${t.status}${st.off === null ? t.statusOn : `${t.statusOff} (${st.off})`}${st.forceNext ? t.queued : ''}`,
+      `${t.verdict}${judged}`,
+      `${t.lastTitle}${st.lastTitle ?? t.none}`,
+      t.recent,
       ...(st.history.length === 0
-        ? ['  아직 없음']
+        ? [t.nothingYet]
         : st.history
             .slice(-3)
             .reverse()

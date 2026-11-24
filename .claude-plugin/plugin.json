@@ -1,17 +1,24 @@
 {
   "name": "session-namer",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "MIT",
   "author": { "name": "etehofk1-ops" },
-  "description": "작업 내용에 맞춰 데스크톱 사이드바의 세션 이름을 자동으로 바꿉니다.",
+  "description": "Renames Claude desktop app sidebar sessions to match the conversation topic, with no extra model call.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "recheckEvery": {
       "type": "number",
-      "title": "이름 다시 보기 간격(메시지 수)",
-      "description": "모드가 이름을 지은 뒤 사용자 메시지가 이만큼 지나면, 대화가 다른 일로 넘어갔는지 한 번 다시 봅니다. 0이면 다시 보지 않습니다.",
+      "title": "Re-check title every N messages / 이름 다시 보기 간격(메시지 수)",
+      "description": "After the mod names a session, it re-checks once the user has sent this many messages, to see whether the chat moved on to a different task. 0 disables it. / 모드가 이름을 지은 뒤 사용자 메시지가 이만큼 지나면, 대화가 다른 일로 넘어갔는지 한 번 다시 봅니다. 0이면 다시 보지 않습니다.",
       "default": 30,
       "min": 0
+    },
+    "language": {
+      "type": "string",
+      "title": "Title language / 이름 언어",
+      "description": "auto: follow the language of your messages (Korean if it has Hangul, English if Latin letters). ko: always Korean. en: always English. / auto는 메시지 언어를 따라가고(한글이 있으면 한국어, 영문이면 영어), ko는 항상 한국어, en은 항상 영어로 이름을 짓습니다.",
+      "options": ["auto", "ko", "en"],
+      "default": "auto"
     }
   }
 }
