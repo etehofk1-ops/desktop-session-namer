@@ -1,0 +1,6 @@
+{
+  "name": "session-namer",
+  "description": "Claude 데스크톱 앱 사이드바의 세션 이름을 대화 주제에 맞게 바꿔 주는 모드",
+  "owner": { "name": "etehofk1-ops" },
+  "plugins": [{ "name": "session-namer", "source": "./" }]
+}

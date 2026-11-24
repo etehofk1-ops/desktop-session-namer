@@ -1,0 +1,17 @@
+{
+  "name": "session-namer",
+  "version": "0.3.0",
+  "license": "MIT",
+  "author": { "name": "etehofk1-ops" },
+  "description": "작업 내용에 맞춰 데스크톱 사이드바의 세션 이름을 자동으로 바꿉니다.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "recheckEvery": {
+      "type": "number",
+      "title": "이름 다시 보기 간격(메시지 수)",
+      "description": "모드가 이름을 지은 뒤 사용자 메시지가 이만큼 지나면, 대화가 다른 일로 넘어갔는지 한 번 다시 봅니다. 0이면 다시 보지 않습니다.",
+      "default": 30,
+      "min": 0
+    }
+  }
+}
