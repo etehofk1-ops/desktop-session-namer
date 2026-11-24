@@ -1,8 +1,10 @@
 import { expect, test } from 'claude-code/testing'
 
 import {
-  buildHint,
-  extractMarker,
+  ANSWER_EXCERPT,
+  USER_EXCERPT,
+  buildNamingRequest,
+  excerpt,
   hasHangul,
   isAutoTitle,
   isRefusalResult,
@@ -11,6 +13,8 @@ import {
   isTrivialMessage,
   judge,
   normTitle,
+  normalizeState,
+  parseNamingReply,
   parseSession,
   pickLang,
   recheckEvery,
@@ -185,122 +189,188 @@ test('recheckEvery: 이상한 값은 30, 음수는 0, 소수는 내림', async (
   expect(recheckEvery(30)).toBe(30)
 })
 
-test('extractMarker: 찾기·지우기·없음·여러 줄', async () => {
-  const a = extractMarker('<!-- session-title: 사진 앨범 공유 -->\n안녕하세요')
-  expect(a.found).toBe('사진 앨범 공유')
-  expect(a.text).toBe('안녕하세요')
-  const b = extractMarker('<!--session-title:   이름이 공백 많음   -->\r\n본문\n둘째 줄')
-  expect(b.found).toBe('이름이 공백 많음')
-  expect(b.text).toBe('본문\n둘째 줄')
-  const c = extractMarker('표시 없는 글\n<!-- 다른 주석 -->')
-  expect(c.found).toBeNull()
-  expect(c.text).toBe('표시 없는 글\n<!-- 다른 주석 -->')
-  const d = extractMarker('앞 말 <!-- session-title: 가운데 표시 --> 뒤 말')
-  expect(d.found).toBe('가운데 표시')
-  expect(d.text).toBe('앞 말  뒤 말')
-  const e = extractMarker('<!-- session-title: 첫째 -->\n<!-- session-title: 둘째 -->\n끝')
-  expect(e.found).toBe('첫째')
-  expect(e.text).toBe('끝')
-  expect(extractMarker('<!-- session-title: 혼자 -->').text).toBe('')
+
+test('excerpt: 공백을 걷고 max자를 넘으면 자르고 …', async () => {
+  expect(excerpt('  안녕  ', 10)).toBe('안녕')
+  expect(excerpt('가나다라마', 5)).toBe('가나다라마')
+  expect(excerpt('가나다라마바', 5)).toBe('가나다라마…')
+  // 코드 포인트 기준(이모지 하나가 한 글자)
+  expect(excerpt('😀😀😀😀', 3)).toBe('😀😀😀…')
+  expect(excerpt(undefined, 5)).toBe('')
+  expect(USER_EXCERPT).toBe(1000)
+  expect(ANSWER_EXCERPT).toBe(800)
 })
 
-test('buildHint: 지금 이름과 표시 형식이 들어 있다', async () => {
-  const h = buildHint('ᄒᄋ')
-  expect(h).toContain('«ᄒᄋ»')
-  expect(h).toContain('<!-- session-title:')
-  expect(h.includes('새 이름')).toBe(false)
+test('buildNamingRequest: 종류·언어별 system 문장', async () => {
+  const ko = buildNamingRequest('first', 'ko', '메모', '사진 앨범 공유 만들자', '네, 시작합니다')
+  expect(ko.system).toContain('대화 세션의 사이드바 이름을 짓는다.')
+  expect(ko.system).toContain('SKIP이라고만 답한다.')
+  expect(ko.system.includes('KEEP')).toBe(false)
+  expect(buildNamingRequest('short', 'ko', '메모', 'a', 'b').system).toBe(ko.system)
+  const st = buildNamingRequest('stale', 'ko', '사진 앨범', 'x', 'y')
+  expect(st.system).toContain('지금 이름은 «사진 앨범»이다. 대화가 다른 일로 넘어가지 않았으면 KEEP이라고만 답한다.')
+  const nw = buildNamingRequest('now', 'ko', '사진 앨범', 'x', 'y')
+  expect(nw.system).toContain('지금 이름은 «사진 앨범»이다. 더 맞는 새 이름을 짓는다.')
+  const en = buildNamingRequest('first', 'en', 'memo', 'x', 'y')
+  expect(en.system).toContain('You name a chat session for a sidebar.')
+  expect(en.system).toContain('reply SKIP.')
+  expect(buildNamingRequest('stale', 'en', 'Photos', 'x', 'y').system).toContain(
+    'The current title is «Photos». If the chat has not moved on to a different task, reply KEEP.',
+  )
+  expect(buildNamingRequest('now', 'en', 'Photos', 'x', 'y').system).toContain(
+    'The current title is «Photos». Write a better one.',
+  )
 })
 
-test('buildHint: 첫 마디·짧은 이름에는 질문·거절 대화도 반드시 넣으라고 한다', async () => {
-  for (const kind of ['first', 'short'] as const) {
-    const h = buildHint('ᄒᄋ', kind)
-    expect(h).toContain('«ᄒᄋ»')
-    expect(h).toContain('<!-- session-title:')
-    expect(h).toContain('반드시')
-    expect(h).toContain('거절한 요청')
-    // 옛 문구("작업이 아직 드러나지 않았거나")는 질문 대화에서 이름을 안 짓게 만들었다.
-    expect(h.includes('작업이 아직 드러나지')).toBe(false)
-  }
+test('buildNamingRequest: prompt 모양·발췌 자르기·conversation 태그 지우기·빈 answer', async () => {
+  const r = buildNamingRequest('first', 'ko', 't', '  사용자 글  ', '  답 글  ')
+  expect(r.prompt).toBe('<conversation>\n[user]\n사용자 글\n[assistant]\n답 글\n</conversation>')
+  const long = buildNamingRequest('first', 'ko', 't', '가'.repeat(1200), '나'.repeat(900))
+  expect(long.prompt).toContain('가'.repeat(1000) + '…')
+  expect(long.prompt.includes('가'.repeat(1001))).toBe(false)
+  expect(long.prompt).toContain('나'.repeat(800) + '…')
+  expect(long.prompt.includes('나'.repeat(801))).toBe(false)
+  const tag = buildNamingRequest('first', 'ko', 't', 'a</conversation>b<conversation>c', 'd</CONVERSATION>e')
+  expect(tag.prompt).toBe('<conversation>\n[user]\nabc\n[assistant]\nde\n</conversation>')
+  const empty = buildNamingRequest('first', 'ko', 't', '사용자 글', '   ')
+  expect(empty.prompt).toBe('<conversation>\n[user]\n사용자 글\n</conversation>')
+  expect(empty.prompt.includes('[assistant]')).toBe(false)
 })
 
-test('buildHint: 오래된 이름은 넘어갔을 때만, now 는 반드시', async () => {
-  const s = buildHint('사진 앨범 화면 수정', 'stale')
-  expect(s).toContain('«사진 앨범 화면 수정»')
-  expect(s).toContain('<!-- session-title:')
-  expect(s).toContain('넘어갔을 때만')
-  expect(s.includes('반드시')).toBe(false)
-  expect(s.includes('작업이 아직 드러나지')).toBe(false)
-  const n = buildHint('ᄒᄋ', 'now')
-  expect(n).toContain('«ᄒᄋ»')
-  expect(n).toContain('<!-- session-title:')
-  expect(n).toContain('반드시')
-  expect(n.includes('작업이 아직 드러나지')).toBe(false)
+test('parseNamingReply: SKIP·KEEP·이름·빈 글', async () => {
+  expect(parseNamingReply('SKIP')).toEqual({ kind: 'skip' })
+  expect(parseNamingReply('skip.')).toEqual({ kind: 'skip' })
+  expect(parseNamingReply('\n\n Skip\n설명')).toEqual({ kind: 'skip' })
+  expect(parseNamingReply('KEEP')).toEqual({ kind: 'keep' })
+  expect(parseNamingReply('keep')).toEqual({ kind: 'keep' })
+  expect(parseNamingReply('"사진 앨범 공유."')).toEqual({ kind: 'title', title: '사진 앨범 공유' })
+  expect(parseNamingReply('\n사진 앨범 공유\n둘째 줄')).toEqual({ kind: 'title', title: '사진 앨범 공유' })
+  // 단어 경계: skipper 는 SKIP 이 아니다.
+  expect(parseNamingReply('Skipper game design')).toEqual({ kind: 'title', title: 'Skipper game design' })
+  expect(parseNamingReply('')).toEqual({ kind: 'bad' })
+  expect(parseNamingReply('   \n ')).toEqual({ kind: 'bad' })
+  expect(parseNamingReply('가')).toEqual({ kind: 'bad' })
+  expect(parseNamingReply(undefined)).toEqual({ kind: 'bad' })
 })
 
-test('buildHint: 어느 종류든 170자 이하(토큰 절약을 못 박는다)', async () => {
-  for (const kind of ['first', 'short', 'stale', 'now'] as const) {
-    expect(buildHint('사진 앨범 화면 수정', kind).length).toBeLessThanOrEqual(170)
-  }
+// 0.4.0이 state-v2 로 저장한 모양(modelFails·usage 없음, 기록에 'hint').
+const V2_OFF = {
+  off: 'manual',
+  lastTitle: '사진 앨범 공유 페이지',
+  promptsSinceSet: 3,
+  forceNext: false,
+  lastSeenTitle: '사진 앨범 공유 페이지',
+  history: [
+    { at: 1, action: 'hint' },
+    { at: 2, action: 'set', title: '사진 앨범 공유 페이지' },
+  ],
+}
+
+const INITIAL_T = {
+  off: null,
+  lastTitle: null,
+  promptsSinceSet: 0,
+  forceNext: false,
+  lastSeenTitle: null,
+  history: [],
+  modelFails: 0,
+  usage: { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, last: null },
+}
+
+test('normalizeState: 0.4.0 값은 지키고 빈 칸(modelFails·usage)만 채운다', async () => {
+  const s = normalizeState(V2_OFF as any, INITIAL_T as any)
+  expect(s.off).toBe('manual')
+  expect(s.lastTitle).toBe('사진 앨범 공유 페이지')
+  expect(s.lastSeenTitle).toBe('사진 앨범 공유 페이지')
+  expect(s.promptsSinceSet).toBe(3)
+  expect(s.history.length).toBe(2)
+  expect(s.history[0]?.action).toBe('hint')
+  expect(s.modelFails).toBe(0)
+  expect(s.usage).toEqual({ calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, last: null })
+  // INITIAL 의 usage 를 함께 쓰지 않는다(사본).
+  expect(s.usage === (INITIAL_T as any).usage).toBe(false)
 })
 
-test('buildHint en: 세 종류 모두 형식·300자 이하·규칙 문구', async () => {
-  for (const kind of ['first', 'short'] as const) {
-    const h = buildHint('hi', kind, 'en')
-    expect(h).toContain('«hi»')
-    expect(h).toContain('<!-- session-title:')
-    expect(h).toContain('Unless')
-    expect(h).toContain('under 40 characters')
-    expect(h.length).toBeLessThanOrEqual(300)
-  }
-  const s = buildHint('Photo album sharing', 'stale', 'en')
-  expect(s).toContain('«Photo album sharing»')
-  expect(s).toContain('<!-- session-title:')
-  expect(s).toContain('Only if')
-  expect(s.length).toBeLessThanOrEqual(300)
-  const n = buildHint('hi', 'now', 'en')
-  expect(n).toContain('«hi»')
-  expect(n).toContain('<!-- session-title:')
-  expect(n.includes('Unless')).toBe(false)
-  expect(n.includes('Only if')).toBe(false)
-  expect(n.length).toBeLessThanOrEqual(300)
-  // 한국어 판은 lang 을 빼면 그대로다.
-  expect(buildHint('ᄒᄋ', 'first')).toBe(buildHint('ᄒᄋ', 'first', 'ko'))
+test('normalizeState: 빈 값·깨진 칸도 죽지 않는다', async () => {
+  expect(normalizeState(undefined, INITIAL_T as any)).toEqual(INITIAL_T as any)
+  expect(normalizeState(null, INITIAL_T as any)).toEqual(INITIAL_T as any)
+  const s = normalizeState(
+    { history: 'x', modelFails: 'two', usage: { calls: 2, input: NaN, last: 5 } } as any,
+    INITIAL_T as any,
+  )
+  expect(s.history).toEqual([])
+  expect(s.modelFails).toBe(0)
+  expect(s.usage).toEqual({ calls: 2, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, last: null })
 })
 
-// ---------- 통합: 앱 도구를 가짜로 세운다 ----------
+// ---------- 통합: 앱 도구와 모델 호출을 가짜로 세운다 ----------
 
 const GET = 'mcp__ccd_session_mgmt__get_session'
 const SET = 'mcp__ccd_session_mgmt__set_session_title'
 
-type Rig = { sets: string[]; gets: number; models: number; rows: any[]; toasts: string[] }
+type Rig = {
+  sets: string[]
+  gets: number
+  /** model.complete 로 들어온 요청들 */
+  calls: any[]
+  toasts: string[]
+}
 
 type RigOpts = {
   title: () => string
   /** 이 세션의 사용자 메시지(기록에 이미 있는 것). */
   history?: string[]
+  /** 이 세션의 assistant 글(사용자 메시지 뒤에 이어 붙는다). */
+  answers?: string[]
   extra?: Record<string, unknown>
   setText?: string
   setError?: boolean
   getError?: boolean
   messagesDeny?: boolean
+  /** n 번째(0부터) model.complete 의 답. 없으면 '사진 앨범 공유 페이지'. */
+  reply?: (n: number, e: any) => unknown
 }
 
+const usageOf = (input = 10, output = 5, cacheRead = 2, cacheWrite = 1) => ({
+  input_tokens: input,
+  output_tokens: output,
+  cache_read_input_tokens: cacheRead,
+  cache_creation_input_tokens: cacheWrite,
+})
+
+const ans = (text: string, usage = usageOf()) => ({ isAnswered: true, text, usage })
+const fail = () => ({
+  isAnswered: false,
+  reason: 'api-error',
+  status: 529,
+  error: 'overloaded',
+  usage: usageOf(0, 0, 0, 0),
+})
+
 async function rig($: any, on: any, opts: RigOpts): Promise<Rig> {
-  const r: Rig = { sets: [], gets: 0, models: 0, rows: [], toasts: [] }
+  const r: Rig = { sets: [], gets: 0, calls: [], toasts: [] }
   on('command.register', () => ({ value: { command: 'session-name' } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: unknown, e: any) => ({ text: e.text, context: e.context }))
+  on('turn.complete', (_: unknown, e: any) => ({ text: e.answer }))
   on('ui.toast', (_: unknown, e: any) => {
     r.toasts.push(e.text)
     return { value: undefined }
   })
   on('session.messages', () => {
     if (opts.messagesDeny) return { value: { deny: 'no rows' } }
-    return { value: (opts.history ?? []).map(t => ({ role: 'user', text: t, toolUses: [] })) }
+    return {
+      value: [
+        ...(opts.history ?? []).map(t => ({ role: 'user', text: t, toolUses: [] })),
+        ...(opts.answers ?? []).map(t => ({ role: 'assistant', text: t, toolUses: [] })),
+      ],
+    }
   })
-  on('model.fork', () => {
-    r.models++
-    return { value: { isAnswered: false, reason: 'x' } }
+  on('model.complete', (_: unknown, e: any) => {
+    const n = r.calls.length
+    r.calls.push(e)
+    const out = (opts.reply ? opts.reply(n, e) : ans('사진 앨범 공유 페이지')) as any
+    return out && out.deny ? out : { value: out }
   })
   on('tool.call', (_: unknown, e: any) => {
     if (e.tool === GET) {
@@ -324,283 +394,425 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 400; i++) await Promise.resolve()
 }
 
-/** 사용자 메시지를 보내고, 모델이 받은 context 를 돌려준다. */
-async function say($: any, text: string, extra: Record<string, unknown> = {}): Promise<readonly string[]> {
+/** 사용자 메시지를 보내고, 모델이 받은 e 를 돌려준다. */
+async function say($: any, text: string, extra: Record<string, unknown> = {}): Promise<any> {
   const out = await $.prompt.submit({ text, ...extra })
   await settle()
-  return out.context ?? []
+  return out
 }
 
-/** 모델의 assistant 줄(글 블록 하나)을 저장시키고, 저장된 글을 돌려준다. */
-async function answer($: any, text: string, extra: Record<string, unknown> = {}): Promise<any> {
-  const out = await $.session.append({
-    message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text }] },
-    door: 'response',
-    origin: { kind: 'model', model: 'm' },
-    uuid: 'u' + Math.random().toString(36).slice(2),
+/** 턴이 끝난다. */
+async function finish($: any, answerText = '네, 시작하겠습니다.', extra: Record<string, unknown> = {}): Promise<any> {
+  const out = await $.turn.complete({
+    answer: answerText,
+    durationMs: 10,
+    isAborted: false,
+    turnId: 't' + Math.random().toString(36).slice(2),
+    reason: 'answer',
     ...extra,
   })
   await settle()
   return out
 }
 
+/** 메시지 하나와 그 턴의 끝. */
+async function turn($: any, text: string, answerText?: string): Promise<void> {
+  await say($, text)
+  await finish($, answerText)
+}
+
 async function cmd($: any, args: string): Promise<string> {
   const out = await $.command.run({ command: 'session-name', args })
+  await settle()
   return out.text ?? ''
 }
 
-const HINT_MARK = '[session-namer]'
-const hinted = (ctx: readonly string[]) => ctx.some(c => c.includes(HINT_MARK))
-
-test('제목 "ᄒᄋ" + 첫 메시지 "ㅎㅇ" → 다음 메시지에 안내가 붙는다', async ($, on) => {
+test('첫 마디 이름 + 긴 메시지 → prompt.submit 에는 안내(context)가 붙지 않는다', async ($, on) => {
   const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  const ctx = await say($, '사진 앨범 공유 페이지 만들자')
-  expect(hinted(ctx)).toBe(true)
-  expect(ctx.join('\n')).toContain('«ᄒᄋ»')
+  const out = await say($, '사진 앨범 공유 페이지 만들자')
+  expect(out.context ?? []).toEqual([])
+  expect(out.text).toBe('사진 앨범 공유 페이지 만들자')
   expect(r.gets).toBe(1)
-  expect(r.models).toBe(0)
+  // 턴이 끝나기 전에는 모델을 부르지 않는다.
+  expect(r.calls.length).toBe(0)
+})
+
+test('turn.complete(answer) → Haiku 를 한 번 부르고 그 답으로 set 한다', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
+  await say($, '사진 앨범 공유 페이지 만들자')
+  const out = await finish($, '네, 앨범 목록부터 만들겠습니다.')
+  // 턴의 결과는 그대로 돌려준다.
+  expect(out.text).toBe('네, 앨범 목록부터 만들겠습니다.')
+  expect(r.calls.length).toBe(1)
+  const c = r.calls[0]
+  expect(c.model).toBe('haiku')
+  expect(c.effort).toBe('low')
+  expect(c.maxTokens).toBe(1024)
+  expect(c.timeoutMs).toBe(30000)
+  expect(c.prompt).toContain('[user]\n사진 앨범 공유 페이지 만들자')
+  expect(c.prompt).toContain('[assistant]\n네, 앨범 목록부터 만들겠습니다.')
+  expect(c.system).toContain('대화 세션의 사이드바 이름을 짓는다.')
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+  expect(r.toasts).toEqual(['세션 이름 → 사진 앨범 공유 페이지'])
+  const status = await cmd($, '')
+  expect(status).toContain('켜짐')
+  expect(status).toContain('queue ᄒᄋ (first)')
 })
 
 test('첫 메시지가 기록에 아직 없으면 지금 메시지를 첫 메시지로 본다', async ($, on) => {
-  await rig($, on, { title: () => '사진 앨범', history: [] })
-  expect(hinted(await say($, '사진 앨범 공유 페이지 만들자'))).toBe(true)
+  const r = await rig($, on, { title: () => '사진 앨범', history: [] })
+  await turn($, '사진 앨범 공유 페이지 만들자')
+  expect(r.calls.length).toBe(1)
 })
 
-test('짧은 메시지("ㅇㅋ")에는 첫 마디 이름이어도 안내를 안 붙이고, get_session 은 한 번 부른다', async ($, on) => {
+test('turn.complete reason aborted → 모델을 안 부르고, 다음 메시지에서 다시 판정한다', async ($, on) => {
   const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  expect(hinted(await say($, 'ㅇㅋ'))).toBe(false)
+  await say($, '사진 앨범 공유 페이지 만들자')
+  await finish($, '', { reason: 'aborted', isAborted: true })
+  expect(r.calls.length).toBe(0)
+  // 예약이 비워졌으니 같은 턴 끝을 또 보내도 부르지 않는다.
+  await finish($)
+  expect(r.calls.length).toBe(0)
+  await turn($, '다시 앨범 공유 페이지 만들자')
+  expect(r.calls.length).toBe(1)
+})
+
+test('turn.complete reason refusal·error → 모델을 안 부른다', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
+  await say($, '사진 앨범 공유 페이지 만들자')
+  await finish($, '', { reason: 'error' })
+  await say($, '사진 앨범 공유 페이지 다시 만들자')
+  await finish($, '', { reason: 'refusal', refusal: { category: null, explanation: null } })
+  expect(r.calls.length).toBe(0)
+})
+
+test('서브에이전트의 turn.complete(agentId) → 안 부르고 예약도 남는다', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
+  await say($, '사진 앨범 공유 페이지 만들자')
+  await finish($, '서브에이전트 보고', { agentId: 'a1' })
+  expect(r.calls.length).toBe(0)
+  await finish($, '메인 답')
+  expect(r.calls.length).toBe(1)
+  expect(r.calls[0].prompt).toContain('메인 답')
+  expect(r.calls[0].prompt.includes('서브에이전트 보고')).toBe(false)
+})
+
+test('예약이 없는 턴(own 판정)의 turn.complete → 안 부른다', async ($, on) => {
+  let title = 'ᄒᄋ'
+  const r = await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.calls.length).toBe(1)
+  title = '사진 앨범 공유 페이지'
+  await turn($, '다음 일을 해 보자')
+  expect(r.calls.length).toBe(1)
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+})
+
+test('Haiku 답 SKIP → set 안 부르고 skip 기록', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], reply: () => ans('SKIP') })
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.calls.length).toBe(1)
+  expect(r.sets).toEqual([])
+  expect(await cmd($, '')).toContain('skip (model-skip)')
+})
+
+test('stale 에서 Haiku 답 KEEP → set 안 부름', async ($, on) => {
+  let title = 'ᄒᄋ'
+  const r = await rig($, on, {
+    title: () => title,
+    history: ['ㅎㅇ'],
+    reply: n => (n === 0 ? ans('사진 앨범 공유 페이지') : ans('KEEP')),
+  })
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+  title = '사진 앨범 공유 페이지'
+  for (let i = 0; i < 29; i++) await turn($, `일 ${i}번째 작업 진행`)
+  expect(r.calls.length).toBe(1)
+  await turn($, '서른째 작업 진행해 보자')
+  expect(r.calls.length).toBe(2)
+  expect(r.calls[1].system).toContain('지금 이름은 «사진 앨범 공유 페이지»이다.')
+  expect(r.calls[1].system).toContain('KEEP')
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+  expect(await cmd($, '')).toContain('same (model-keep)')
+  // 점검 뒤에는 카운터가 0 으로 돌아가 바로 또 부르지 않는다.
+  await turn($, '그다음 작업 진행해 보자')
+  expect(r.calls.length).toBe(2)
+})
+
+test('Haiku 답에 따옴표·마침표 → 다듬어서 set', async ($, on) => {
+  const r = await rig($, on, {
+    title: () => 'ᄒᄋ',
+    history: ['ㅎㅇ'],
+    reply: () => ans('"사진 앨범 공유 페이지."\n설명은 하지 않습니다'),
+  })
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+})
+
+test('Haiku 답이 쓸 수 없는 이름(너무 짧음)이면 set 안 부르고 bad-title', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], reply: () => ans('가') })
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.sets).toEqual([])
+  expect(await cmd($, '')).toContain('skip (bad-title)')
+})
+
+test('이름이 지금 이름과 같으면 set 을 안 부른다', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], reply: () => ans('ᄒᄋ') })
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.calls.length).toBe(1)
+  expect(r.sets).toEqual([])
+})
+
+test('model.complete 가 isAnswered false 로 3번 연속 → off model-failed, 이후 안 부른다', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], reply: () => fail() })
+  await turn($, '첫째 앨범 공유 일을 시작하자')
+  await turn($, '둘째 앨범 공유 일을 시작하자')
+  expect((await cmd($, '')).split('\n')[0]).toContain('켜짐')
+  await turn($, '셋째 앨범 공유 일을 시작하자')
+  expect(r.calls.length).toBe(3)
+  const status = await cmd($, '')
+  expect(status).toContain('꺼짐 (model-failed)')
+  expect(status).toContain('error (model: api-error 529)')
+  await turn($, '넷째 앨범 공유 일을 시작하자')
+  expect(r.calls.length).toBe(3)
+  expect(r.sets).toEqual([])
+})
+
+test('중간에 한 번 성공하면 연속 실패로 세지 않는다', async ($, on) => {
+  const replies = [fail(), fail(), ans('SKIP'), fail(), fail()]
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], reply: n => replies[n] })
+  for (const w of ['첫째', '둘째', '셋째', '넷째', '다섯째']) await turn($, `${w} 앨범 공유 일을 시작하자`)
+  expect(r.calls.length).toBe(5)
+  expect((await cmd($, '')).split('\n')[0]).toContain('켜짐')
+})
+
+test('model.complete 를 보내지도 못하면 off model-unavailable', async ($, on) => {
+  const r = await rig($, on, {
+    title: () => 'ᄒᄋ',
+    history: ['ㅎㅇ'],
+    reply: () => ({ deny: 'model blocked by allowlist' }),
+  })
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.calls.length).toBe(1)
+  const status = await cmd($, '')
+  expect(status).toContain('꺼짐 (model-unavailable)')
+  expect(r.sets).toEqual([])
+})
+
+test('usage 가 상태에 쌓이고 /session-name 출력에 호출 수·토큰이 보인다', async ($, on) => {
+  let title = 'ᄒᄋ'
+  const replies = [ans('사진 앨범 공유 페이지', usageOf(100, 7, 20, 3)), ans('KEEP', usageOf(50, 1, 0, 0))]
+  await rig($, on, { title: () => title, history: ['ㅎㅇ'], reply: n => replies[n] })
+  expect(await cmd($, '')).toContain('Haiku 호출 0번')
+  await turn($, '앨범 공유 페이지 시작하자')
+  title = '사진 앨범 공유 페이지'
+  for (let i = 0; i < 29; i++) await turn($, `일 ${i}번째 작업 진행`)
+  await turn($, '서른째 작업 진행해 보자')
+  const s = await cmd($, '')
+  expect(s).toContain('Haiku 호출 2번, 토큰 입력 150·출력 8·캐시 읽기 20·캐시 쓰기 3')
+  expect(s).toContain('마지막 호출: 입력 50·출력 1')
+})
+
+test('/session-name now → 기다리지 않고 바로 model.complete 를 부르고 set 한다', async ($, on) => {
+  const r = await rig($, on, {
+    title: () => '린트 규칙 정리',
+    history: ['이 폴더의 린트 규칙을 정리하고 시험까지 돌려 줘. 끝나면 보고해'],
+    answers: ['정리했습니다. 시험도 통과했습니다.'],
+    reply: () => ans('린트 규칙 정리와 시험 실행'),
+  })
+  await turn($, '계속해서 시험까지 돌려 줘')
+  expect(r.calls.length).toBe(0)
+  expect(await cmd($, 'now')).toContain('짓는 중')
+  expect(r.calls.length).toBe(1)
+  const c = r.calls[0]
+  expect(c.system).toContain('지금 이름은 «린트 규칙 정리»이다. 더 맞는 새 이름을 짓는다.')
+  expect(c.prompt).toContain('[user]\n이 폴더의 린트 규칙을 정리하고')
+  expect(c.prompt).toContain('[assistant]\n정리했습니다. 시험도 통과했습니다.')
+  expect(r.sets).toEqual(['린트 규칙 정리와 시험 실행'])
+  expect(r.toasts).toEqual(['세션 이름 → 린트 규칙 정리와 시험 실행'])
+})
+
+test('now 는 user-renamed 로 꺼진 세션에서도 지으며, 새 이름을 받으면 다시 켠다', async ($, on) => {
+  let title = 'ᄒᄋ'
+  const r = await rig($, on, {
+    title: () => title,
+    history: ['ㅎㅇ', '앨범 공유 페이지 시작하자'],
+    answers: ['네'],
+    reply: n => ans(n === 0 ? '사진 앨범 공유 페이지' : '앨범 공유 페이지 개선'),
+  })
+  await turn($, '앨범 공유 페이지 시작하자')
+  title = '내가 정한 이름'
+  await say($, '다음 일을 해 보자')
+  expect(await cmd($, '')).toContain('user-renamed')
+  expect(await cmd($, 'now')).toContain('짓는 중')
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지', '앨범 공유 페이지 개선'])
+  expect((await cmd($, '')).split('\n')[0]).toContain('켜짐')
+})
+
+test('now: 기록을 못 읽으면 다음 턴 끝으로 미룬다(off 여도 한 번)', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', messagesDeny: true })
+  await cmd($, 'off')
+  expect(await cmd($, 'now')).toContain('다음 메시지의 턴이 끝나면')
+  expect(r.calls.length).toBe(0)
+  expect(await cmd($, '')).toContain('다음 턴 끝에 이름 짓기 예약됨')
+  await say($, 'ㅇㅋ')
+  await finish($)
+  expect(r.calls.length).toBe(1)
+  expect(r.calls[0].system).toContain('더 맞는 새 이름을 짓는다.')
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+  // 한 번만 쓴다.
+  await turn($, '그다음 일을 해 보자')
+  expect(r.calls.length).toBe(1)
+})
+
+test('짧은 메시지("ㅇㅋ")면 예약을 안 만들고 get_session 은 한 번 부른다', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
+  await turn($, 'ㅇㅋ')
+  expect(r.calls.length).toBe(0)
   expect(r.gets).toBe(1)
   expect(await cmd($, '')).toContain('skip (trivial)')
 })
 
-test('짧은 메시지 다음의 긴 메시지에만 안내가 붙는다', async ($, on) => {
+test('짧은 메시지 다음의 긴 메시지에서만 모델을 부른다', async ($, on) => {
   const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  expect(hinted(await say($, 'ㅎㅇ'))).toBe(false)
-  expect(hinted(await say($, '사진 앨범 공유 페이지 만들자'))).toBe(true)
+  await turn($, 'ㅎㅇ')
+  expect(r.calls.length).toBe(0)
+  await turn($, '사진 앨범 공유 페이지 만들자')
+  expect(r.calls.length).toBe(1)
   expect(r.gets).toBe(2)
 })
 
-test('/session-name now 는 짧은 메시지에도 안내를 붙인다', async ($, on) => {
-  await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  await cmd($, 'now')
-  expect(hinted(await say($, 'ㅇㅋ'))).toBe(true)
+test('메시지 기록을 못 읽으면 짧은 이름 규칙만 쓴다(짧으면 지음)', async ($, on) => {
+  const r = await rig($, on, { title: () => '뭐지', messagesDeny: true })
+  await turn($, '아주 긴 지시문이 이어집니다')
+  expect(r.calls.length).toBe(1)
 })
 
-test('메시지 기록을 못 읽으면 짧은 이름 규칙만 쓴다(짧으면 붙음)', async ($, on) => {
-  await rig($, on, { title: () => '뭐지', messagesDeny: true })
-  expect(hinted(await say($, '아주 긴 지시문이 이어집니다'))).toBe(true)
+test('메시지 기록을 못 읽고 이름이 길면 안 짓는다', async ($, on) => {
+  const r = await rig($, on, { title: () => '긴 이름이지만 첫 마디', messagesDeny: true })
+  await turn($, '긴 이름이지만 첫 마디')
+  expect(r.calls.length).toBe(0)
 })
 
-test('메시지 기록을 못 읽고 이름이 길면 안내를 안 붙인다', async ($, on) => {
-  await rig($, on, { title: () => '긴 이름이지만 첫 마디', messagesDeny: true })
-  expect(hinted(await say($, '긴 이름이지만 첫 마디'))).toBe(false)
-})
-
-test('제목 "린트 규칙 정리" + 긴 첫 지시문 → 안내가 안 붙는다', async ($, on) => {
+test('제목 "린트 규칙 정리" + 긴 첫 지시문 → 안 짓는다', async ($, on) => {
   const r = await rig($, on, {
     title: () => '린트 규칙 정리',
     history: ['이 폴더의 린트 규칙을 정리하고 시험까지 돌려 줘. 끝나면 보고해'],
   })
-  expect(hinted(await say($, '계속해서 시험까지 돌려 줘'))).toBe(false)
+  await turn($, '계속해서 시험까지 돌려 줘')
+  expect(r.calls.length).toBe(0)
   expect(r.gets).toBe(1)
 })
 
-test('앱이 첫 메시지를 잘라 이름으로 쓴 경우에도 안내가 붙는다', async ($, on) => {
+test('앱이 첫 메시지를 잘라 이름으로 쓴 경우에도 짓는다', async ($, on) => {
   const first = '사진 앨범 공유 페이지를 만들어 줘. 날짜별로 묶어서 보여 줘'
-  await rig($, on, { title: () => '사진 앨범 공유 페이지를 만들어 줘. 날짜별로', history: [first] })
-  expect(hinted(await say($, '계속해서 결제 화면도 만들어 줘'))).toBe(true)
+  const r = await rig($, on, { title: () => '사진 앨범 공유 페이지를 만들어 줘. 날짜별로', history: [first] })
+  await turn($, '계속해서 결제 화면도 만들어 줘')
+  expect(r.calls.length).toBe(1)
 })
 
-test('assistant 줄의 표시 → 저장 글에서 지워지고 set 이 새 이름으로 불린다', async ($, on) => {
-  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  expect(hinted(await say($, '앨범 공유 페이지 만들자'))).toBe(true)
-  const out = await answer($, '<!-- session-title: "사진 앨범 공유 페이지." -->\n네, 시작하겠습니다.')
-  expect(out.message.content.map((b: any) => b.text)).toEqual(['네, 시작하겠습니다.'])
-  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
-  const status = await cmd($, '')
-  expect(status).toContain('켜짐')
-  expect(status).toContain('사진 앨범 공유 페이지')
-  expect(r.models).toBe(0)
-})
-
-test('표시가 없는 줄은 그대로, 글이 아닌 블록은 건드리지 않는다', async ($, on) => {
-  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  await say($, '앨범 공유 페이지 시작하자')
-  const plain =await answer($, '그냥 답입니다')
-  expect(plain.message.content.map((b: any) => b.text)).toEqual(['그냥 답입니다'])
-  const tool = { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'a' } }
-  const mixed = await $.session.append({
-    message: {
-      type: 'assistant',
-      role: 'assistant',
-      content: [{ type: 'text', text: '<!-- session-title: 앨범 공유 페이지 제작 -->' }, tool],
-    },
-    door: 'response',
-    origin: { kind: 'model', model: 'm' },
-    uuid: 'mixed1',
-  })
-  await settle()
-  expect(mixed.message!.content).toEqual([tool])
-  expect(r.sets).toEqual(['앨범 공유 페이지 제작'])
-})
-
-test('서브에이전트 줄·user 줄의 표시는 이름을 바꾸지 않는다', async ($, on) => {
-  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  await say($, '앨범 공유 페이지 시작하자')
-  await answer($, '<!-- session-title: 서브에이전트가 쓴 이름 -->\n본문', { agentId: 'a1' })
-  expect(r.sets).toEqual([])
-  await $.session.append({
-    message: { type: 'user', role: 'user', content: [{ type: 'text', text: '<!-- session-title: 사용자 줄 이름 -->' }] },
-    door: 'prompt',
-    origin: { kind: 'composer' } as any,
-    uuid: 'user1',
-  })
-  await settle()
-  expect(r.sets).toEqual([])
-})
-
-test('안내를 붙이지 않은 턴의 표시는 지우기만 하고 이름은 안 바꾼다', async ($, on) => {
-  const r = await rig($, on, {
-    title: () => '린트 규칙 정리',
-    history: ['이 폴더의 린트 규칙을 정리하고 시험까지 돌려 줘. 끝나면 보고해'],
-  })
-  await say($, '계속해서 시험까지 돌려 줘')
-  const out = await answer($, '<!-- session-title: 멋대로 지은 이름 -->\n본문')
-  expect(out.message.content.map((b: any) => b.text)).toEqual(['본문'])
-  expect(r.sets).toEqual([])
-})
-
-test('이름이 지금 이름과 같거나 쓸 수 없으면 set 을 안 부른다', async ($, on) => {
-  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  await say($, '앨범 공유 페이지 시작하자')
-  await answer($, '<!-- session-title: ᄒᄋ -->\n본문')
-  expect(r.sets).toEqual([])
-  await say($, '다시 한번 해 보자')
-  await answer($, '<!-- session-title: 가 -->\n본문')
-  expect(r.sets).toEqual([])
-})
-
-test('lastTitle 과 다른 지금 이름 → user-renamed, 안내 안 붙음', async ($, on) => {
+test('lastTitle 과 다른 지금 이름 → user-renamed, 이후 안 읽고 안 부른다', async ($, on) => {
   let title = 'ᄒᄋ'
   const r = await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
-  await say($, '앨범 공유 페이지 시작하자')
-  await answer($, '<!-- session-title: 사진 앨범 공유 페이지 -->\n본문')
+  await turn($, '앨범 공유 페이지 시작하자')
   expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
   title = '내가 정한 이름'
-  expect(hinted(await say($, '다음 일'))).toBe(false)
+  await turn($, '다음 일')
   expect(await cmd($, '')).toContain('user-renamed')
-  // 이미 꺼졌으니 다시 읽지도 않는다.
+  expect(r.calls.length).toBe(1)
   const before = r.gets
-  expect(hinted(await say($, '또 다음 일'))).toBe(false)
+  await turn($, '또 다음 일')
   expect(r.gets).toBe(before)
+  expect(r.calls.length).toBe(1)
 })
 
 test('예약 작업 세션 → 아무것도 안 한다', async ($, on) => {
   const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], extra: { scheduledTaskId: 'task-1' } })
-  expect(hinted(await say($, '앨범 공유 페이지 시작하자'))).toBe(false)
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.calls.length).toBe(0)
   expect(r.sets).toEqual([])
   expect(await cmd($, '')).toContain('scheduled')
 })
 
 test('도구가 없으면(unavailable) 이 세션에서는 끈다', async ($, on) => {
   const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], getError: true })
-  expect(hinted(await say($, '앨범 공유 페이지 시작하자'))).toBe(false)
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.calls.length).toBe(0)
   expect(await cmd($, '')).toContain('unavailable')
   const before = r.gets
-  await say($, '또 다른 일을 해 보자')
+  await turn($, '또 다른 일을 해 보자')
   expect(r.gets).toBe(before)
 })
 
-test('/session-name now → 다음 메시지에 한 번 붙는다', async ($, on) => {
-  const r = await rig($, on, {
-    title: () => '린트 규칙 정리',
-    history: ['이 폴더의 린트 규칙을 정리하고 시험까지 돌려 줘. 끝나면 보고해'],
-  })
-  expect(hinted(await say($, '계속해서 시험까지 돌려 줘'))).toBe(false)
-  expect(await cmd($, 'now')).toContain('한 번')
-  expect(hinted(await say($, '이제 다른 일'))).toBe(true)
-  expect(hinted(await say($, '그다음'))).toBe(false)
-  await answer($, 'x')
-  expect(r.models).toBe(0)
-})
-
-test('now 는 꺼진 세션·user-renamed 여도 한 번 붙고, 새 이름을 받으면 다시 켠다', async ($, on) => {
-  let title = 'ᄒᄋ'
-  const r = await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
-  await say($, '앨범 공유 페이지 시작하자')
-  await answer($, '<!-- session-title: 사진 앨범 공유 페이지 -->\n본문')
-  title = '내가 정한 이름'
-  await say($, '다음 일을 해 보자')
-  expect(await cmd($, '')).toContain('user-renamed')
-  await cmd($, 'now')
-  expect(hinted(await say($, '한 번만 봐줘'))).toBe(true)
-  await answer($, '<!-- session-title: 앨범 공유 페이지 개선 -->\n본문')
-  expect(r.sets).toEqual(['사진 앨범 공유 페이지', '앨범 공유 페이지 개선'])
-  expect((await cmd($, '')).split('\n')[0]).toContain('켜짐')
-})
-
-test('슬래시 명령·isMeta 메시지엔 안 붙고 도구도 안 부른다', async ($, on) => {
+test('슬래시 명령·isMeta 메시지는 예약도 도구 호출도 안 한다', async ($, on) => {
   const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  expect(hinted(await say($, '/compact', { command: { name: 'compact', args: '' } }))).toBe(false)
-  expect(hinted(await say($, '시스템이 보낸 알림', { isMeta: true }))).toBe(false)
+  await say($, '/compact', { command: { name: 'compact', args: '' } })
+  await finish($)
+  await say($, '시스템이 보낸 알림', { isMeta: true })
+  await finish($)
   expect(r.gets).toBe(0)
-  // 같은 세션의 평범한 메시지에는 붙는다.
-  expect(hinted(await say($, '진짜 말 시작해 보자'))).toBe(true)
+  expect(r.calls.length).toBe(0)
+  await turn($, '진짜 말 시작해 보자')
+  expect(r.calls.length).toBe(1)
 })
 
-test('모드가 지은 이름: 29개째까지는 조용하고 30개째에 안내(기본 30)', async ($, on) => {
+test('모드가 지은 이름: 29개째까지는 조용하고 30개째에 점검(기본 30)', async ($, on) => {
   let title = 'ᄒᄋ'
   const r = await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
-  await say($, '앨범 공유 페이지 시작하자')
-  await answer($, '<!-- session-title: 사진 앨범 공유 페이지 -->\n본문')
+  await turn($, '앨범 공유 페이지 시작하자')
   title = '사진 앨범 공유 페이지' // 앱이 바꾼 이름이 보이게 된다
-  for (let i = 0; i < 29; i++) expect(hinted(await say($, `일 ${i}번째 작업 진행`))).toBe(false)
-  expect(hinted(await say($, '서른째 작업 진행해 보자'))).toBe(true)
-  // 안내 뒤에는 카운터가 0 으로 돌아가 바로 또 붙지 않는다.
-  expect(hinted(await say($, '그다음 작업 진행해 보자'))).toBe(false)
-  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+  for (let i = 0; i < 29; i++) await turn($, `일 ${i}번째 작업 진행`)
+  expect(r.calls.length).toBe(1)
+  await turn($, '서른째 작업 진행해 보자')
+  expect(r.calls.length).toBe(2)
+  expect(r.calls[1].system).toContain('KEEP')
 })
 
-test('recheckEvery 0: 40개가 지나도 오래됨 안내가 없다', { options: { recheckEvery: 0 } }, async ($, on) => {
+test('recheckEvery 0: 40개가 지나도 점검이 없다', { options: { recheckEvery: 0 } }, async ($, on) => {
   let title = 'ᄒᄋ'
-  await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
-  await say($, '앨범 공유 페이지 시작하자')
-  await answer($, '<!-- session-title: 사진 앨범 공유 페이지 -->\n본문')
+  const r = await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
+  await turn($, '앨범 공유 페이지 시작하자')
   title = '사진 앨범 공유 페이지'
-  for (let i = 0; i < 40; i++) expect(hinted(await say($, `일 ${i}번째 작업 진행`))).toBe(false)
+  for (let i = 0; i < 40; i++) await turn($, `일 ${i}번째 작업 진행`)
+  expect(r.calls.length).toBe(1)
 })
 
-test('recheckEvery 5: 5개째에 오래됨 안내', { options: { recheckEvery: 5 } }, async ($, on) => {
+test('recheckEvery 5: 5개째에 점검', { options: { recheckEvery: 5 } }, async ($, on) => {
   let title = 'ᄒᄋ'
-  await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
-  await say($, '앨범 공유 페이지 시작하자')
-  await answer($, '<!-- session-title: 사진 앨범 공유 페이지 -->\n본문')
+  const r = await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
+  await turn($, '앨범 공유 페이지 시작하자')
   title = '사진 앨범 공유 페이지'
-  for (let i = 0; i < 4; i++) expect(hinted(await say($, `일 ${i}번째 작업 진행`))).toBe(false)
-  expect(hinted(await say($, '다섯째 작업 진행해 보자'))).toBe(true)
+  for (let i = 0; i < 4; i++) await turn($, `일 ${i}번째 작업 진행`)
+  expect(r.calls.length).toBe(1)
+  await turn($, '다섯째 작업 진행해 보자')
+  expect(r.calls.length).toBe(2)
 })
 
-test('/session-name off 뒤에는 안내도 도구 호출도 없다', async ($, on) => {
+test('/session-name off 뒤에는 예약도 도구 호출도 없다', async ($, on) => {
   const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
   expect(await cmd($, 'off')).toContain('껐')
-  expect(hinted(await say($, '앨범 공유 페이지 시작하자'))).toBe(false)
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.calls.length).toBe(0)
   expect(r.gets).toBe(0)
   expect(await cmd($, 'on')).toContain('켰')
-  expect(hinted(await say($, '다시 앨범 공유 페이지 시작하자'))).toBe(true)
+  await turn($, '다시 앨범 공유 페이지 시작하자')
+  expect(r.calls.length).toBe(1)
 })
 
 test('앱이 거절하면 이 세션에서는 끈다', async ($, on) => {
   const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], setText: 'User declined the title change' })
-  await say($, '앨범 공유 페이지 시작하자')
-  await answer($, '<!-- session-title: 사진 앨범 공유 페이지 -->\n본문')
+  await turn($, '앨범 공유 페이지 시작하자')
   expect(r.sets.length).toBe(1)
   expect(await cmd($, '')).toContain('set-refused')
 })
 
 test('제목에 "거절"이 들어 있어도 끄지 않는다', async ($, on) => {
-  const r = await rig($, on, { title: () => '거절', history: ['거절'] })
-  expect(hinted(await say($, '메일 답장 정리하자'))).toBe(true)
-  await answer($, '<!-- session-title: 거절 메일 답장 정리 -->\n본문')
+  const r = await rig($, on, {
+    title: () => '거절',
+    history: ['거절'],
+    reply: () => ans('거절 메일 답장 정리'),
+  })
+  await turn($, '메일 답장 정리하자')
   expect(r.sets).toEqual(['거절 메일 답장 정리'])
 })
 
@@ -613,69 +825,124 @@ test('상태: 지금 판정과 최근 기록을 보여 준다', async ($, on) =>
   expect(await cmd($, 'zzz')).toContain('쓰는 법')
 })
 
+/** 0.4.0이 남긴 값을 들고 있는 저장소를 세운다. 쓰기는 버전을 올려 받아 준다. */
+function seedStore(on: any, value: unknown, shape = 'state-v2'): { stored: () => any } {
+  let stored: any = { shape, value }
+  let version = 1
+  on('state.get', () => ({ value: { value: stored, version } }))
+  on('state.set', (_: unknown, e: any) => {
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    stored = e.value
+    version++
+    return { value: { isSet: true, version } }
+  })
+  return { stored: () => stored }
+}
+
+test('0.4.0 상태(state-v2)를 이어 읽는다: 끈 세션은 꺼진 채, 토큰 줄은 0', async ($, on) => {
+  const db = seedStore(on, V2_OFF)
+  const r = await rig($, on, { title: () => '사진 앨범 공유 페이지', history: ['앨범 공유 페이지 만들자'] })
+  const s = await cmd($, '')
+  expect(s).toContain('상태: 꺼짐 (manual)')
+  expect(s).toContain('마지막으로 정한 이름: 사진 앨범 공유 페이지')
+  expect(s).toContain('Haiku 호출 0번')
+  expect(s).toContain('hint')
+  // 상태 명령은 지금 이름을 한 번 읽는다. 그 뒤로는 읽지 않아야 한다.
+  const g0 = r.gets
+  await turn($, '댓글 기능도 붙여 줘')
+  expect(r.calls.length).toBe(0)
+  expect(r.gets).toBe(g0)
+  // 켜면 같은 태그로 쓰고, 0.4.0 기록은 남기고 새 칸을 채운다(lastTitle 비우기는 on 의 원래 동작).
+  expect(await cmd($, 'on')).toContain('켰')
+  const w = db.stored()
+  expect(w.shape).toBe('state-v2')
+  expect(w.value.off).toBe(null)
+  expect(w.value.lastTitle).toBe(null)
+  expect(w.value.lastSeenTitle).toBe('사진 앨범 공유 페이지')
+  expect(w.value.history.map((h: any) => h.action)).toEqual(['hint', 'set'])
+  expect(w.value.modelFails).toBe(0)
+  expect(w.value.usage.calls).toBe(0)
+})
+
+test('0.4.0 상태에서 켜진 세션: 첫 Haiku 호출이 빈 usage 위에 쌓인다', async ($, on) => {
+  const db = seedStore(on, { ...V2_OFF, off: null, lastTitle: null, lastSeenTitle: null, promptsSinceSet: 0 })
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+  const w = db.stored()
+  expect(w.shape).toBe('state-v2')
+  expect(w.value.usage.calls).toBe(1)
+  expect(w.value.usage.input).toBe(10)
+  expect(w.value.history.some((h: any) => h.action === 'hint')).toBe(true)
+})
+
 // ---------- 언어(영어) ----------
 
 const EN_FIRST = 'Photo album sharing page, please'
 
-test('auto: 영어 메시지 → 영어 안내', async ($, on) => {
-  await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
-  const ctx = (await say($, EN_FIRST)).join('\n')
-  expect(ctx).toContain('«Photo album»')
-  expect(ctx).toContain('Unless the message is only a greeting')
-  expect(ctx.includes('반드시')).toBe(false)
+test('auto: 영어 메시지 → 영어 system 문장', async ($, on) => {
+  const r = await rig($, on, { title: () => 'Photo album', history: [EN_FIRST], reply: () => ans('Photo album sharing page') })
+  await turn($, EN_FIRST)
+  expect(r.calls.length).toBe(1)
+  expect(r.calls[0].system).toContain('You name a chat session for a sidebar.')
+  expect(r.calls[0].system.includes('대화 세션')).toBe(false)
 })
 
-test('language ko: 영어 메시지에도 한국어 안내', { options: { language: 'ko' } }, async ($, on) => {
-  await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
-  const ctx = (await say($, EN_FIRST)).join('\n')
-  expect(ctx).toContain('반드시')
-  expect(ctx.includes('Unless')).toBe(false)
+test('language ko: 영어 메시지에도 한국어 system 문장', { options: { language: 'ko' } }, async ($, on) => {
+  const r = await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
+  await turn($, EN_FIRST)
+  expect(r.calls[0].system).toContain('대화 세션의 사이드바 이름을 짓는다.')
+  expect(r.calls[0].system.includes('You name')).toBe(false)
 })
 
-test('language en: 한국어 메시지에도 영어 안내', { options: { language: 'en' } }, async ($, on) => {
-  await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  const ctx = (await say($, '사진 앨범 공유 페이지 만들자')).join('\n')
-  expect(ctx).toContain('Unless the message is only a greeting')
-  expect(ctx.includes('반드시')).toBe(false)
+test('language en: 한국어 메시지에도 영어 system 문장', { options: { language: 'en' } }, async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], reply: () => ans('Photo album sharing page') })
+  await turn($, '사진 앨범 공유 페이지 만들자')
+  expect(r.calls[0].system).toContain('You name a chat session for a sidebar.')
+  expect(r.calls[0].system.includes('대화 세션')).toBe(false)
 })
 
 test('영어 대화에서 이름이 바뀌면 알림이 영어', async ($, on) => {
-  const r = await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
-  await say($, EN_FIRST)
-  await answer($, '<!-- session-title: Photo album sharing page -->\nSure, starting now.')
+  const r = await rig($, on, { title: () => 'Photo album', history: [EN_FIRST], reply: () => ans('Photo album sharing page') })
+  await turn($, EN_FIRST, 'Sure, starting now.')
   expect(r.sets).toEqual(['Photo album sharing page'])
   expect(r.toasts).toEqual(['Session title → Photo album sharing page'])
 })
 
 test('한국어 대화에서 이름이 바뀌면 알림이 한국어', async ($, on) => {
   const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
-  await say($, '앨범 공유 페이지 시작하자')
-  await answer($, '<!-- session-title: 사진 앨범 공유 페이지 -->\n본문')
+  await turn($, '앨범 공유 페이지 시작하자')
   expect(r.toasts).toEqual(['세션 이름 → 사진 앨범 공유 페이지'])
 })
 
-test('상태 명령은 마지막 언어로 영어 출력', async ($, on) => {
-  await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
+test('상태 명령은 마지막 언어로 영어 출력(토큰 줄 포함)', async ($, on) => {
+  await rig($, on, { title: () => 'Photo album', history: [EN_FIRST], answers: ['ok'] })
   await say($, EN_FIRST)
   const s = await cmd($, '')
   expect(s).toContain('Status: on')
   expect(s).toContain('Current verdict: first-message title («Photo album»)')
   expect(s).toContain('Last title set: none')
+  expect(s).toContain('Haiku calls: 0, tokens in 0 · out 0 · cache read 0 · cache write 0')
+  expect(s.includes('Last call:')).toBe(false)
   expect(s).toContain('Recent history:')
   expect(await cmd($, 'zzz')).toContain('Usage:')
-  expect(await cmd($, 'now')).toContain('once')
   expect(await cmd($, 'off')).toContain('off for this session')
   expect(await cmd($, 'on')).toContain('back on')
+  expect(await cmd($, 'now')).toContain('Naming this session now')
 })
 
-test('41자 영어 제목이 실제로 적용되고 61자는 버려진다', async ($, on) => {
-  const r = await rig($, on, { title: () => 'Photo album', history: [EN_FIRST] })
-  await say($, EN_FIRST)
+test('영어 상태: 호출 뒤에는 마지막 호출 줄이 보인다', async ($, on) => {
+  await rig($, on, { title: () => 'Photo album', history: [EN_FIRST], reply: () => ans('Photo album sharing page', usageOf(30, 4, 5, 6)) })
+  await turn($, EN_FIRST)
+  const s = await cmd($, '')
+  expect(s).toContain('Haiku calls: 1, tokens in 30 · out 4 · cache read 5 · cache write 6')
+  expect(s).toContain('Last call: in 30 · out 4')
+})
+
+test('41자 영어 제목이 실제로 적용된다', async ($, on) => {
   const t41 = 'Migrate the legacy billing service to API'
   expect([...t41].length).toBeGreaterThan(40)
-  await answer($, `<!-- session-title: ${t41} -->\nok`)
-  expect(r.sets).toEqual([t41])
-  await say($, 'Next, please look at the second task now')
-  await answer($, `<!-- session-title: ${'b'.repeat(61)} -->\nok`)
+  const r = await rig($, on, { title: () => 'Photo album', history: [EN_FIRST], reply: () => ans(t41) })
+  await turn($, EN_FIRST)
   expect(r.sets).toEqual([t41])
 })

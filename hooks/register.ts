@@ -1,24 +1,28 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { NamerAction, NamerEntry, NamerState } from '../types'
+import type { NamerAction, NamerEntry, NamerState, NamerTokens, NamerUsage } from '../types'
 import {
-  buildHint,
-  extractMarker,
+  buildNamingRequest,
   isRefusalResult,
   isScheduledSession,
   isToolError,
   isTrivialMessage,
   judge,
+  normalizeState,
+  parseNamingReply,
   parseSession,
   pickLang,
   recheckEvery,
   sanitizeTitle,
 } from './logic'
-import type { HintKind, Lang, Verdict } from './logic'
+import type { Lang, NameKind, Verdict } from './logic'
 
 const GET = 'mcp__ccd_session_mgmt__get_session'
 const SET = 'mcp__ccd_session_mgmt__set_session_title'
+
+/** Haiku 호출이 이만큼 연속으로 실패하면 이 세션에서는 끈다. */
+const MAX_MODEL_FAILS = 3
 
 const INITIAL: NamerState = {
   off: null,
@@ -27,11 +31,27 @@ const INITIAL: NamerState = {
   forceNext: false,
   lastSeenTitle: null,
   history: [],
+  modelFails: 0,
+  usage: { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, last: null },
 }
-// 저장 형태가 바뀌면 태그를 올린다(옛 값은 버려진다).
+// 태그는 0.4.0과 같은 state-v2 로 둔다. 올리면 켜진 세션의 상태(off·lastTitle)가 지워진다.
+// 0.5.0에서 더한 칸(modelFails·usage)은 normalizeState 가 빈 값으로 채운다.
 const store = atom({ plugin: 'session-namer', key: 'state' } as const, INITIAL, {
   shape: 'state-v2',
 })
+
+async function readState($: EngineInterface): Promise<NamerState> {
+  return normalizeState(await read($, store), INITIAL)
+}
+
+/** prompt.submit 이 예약해 두고 turn.complete 가 꺼내 쓰는 이름 짓기 건. */
+type Pending = {
+  kind: NameKind
+  currentTitle: string
+  userText: string
+  forced: boolean
+  lang: Lang
+}
 
 type LooseResult = {
   text?: string
@@ -66,7 +86,7 @@ function errMsg(e: unknown): string {
 }
 
 async function patch($: EngineInterface, fn: (s: NamerState) => NamerState): Promise<void> {
-  await update($, store, fn)
+  await update($, store, s => fn(normalizeState(s, INITIAL)))
 }
 
 function record(s: NamerState, entry: Omit<NamerEntry, 'at'>): NamerState {
@@ -118,6 +138,25 @@ async function readFirstMessage($: EngineInterface): Promise<string | null | fal
   }
 }
 
+/** 기록에서 마지막 user 글과 마지막 assistant 글. 읽지 못하거나 user 글이 없으면 null. */
+async function readLastExchange($: EngineInterface): Promise<{ user: string; answer: string } | null> {
+  try {
+    const rows = await $.session.messages()
+    if (!Array.isArray(rows)) return null
+    let user: string | null = null
+    let answer = ''
+    for (const m of rows) {
+      if (typeof m.text !== 'string' || m.text.trim() === '') continue
+      // 이 명령 자신의 줄은 대화가 아니다.
+      if (m.role === 'user' && !m.text.trim().startsWith('/session-name')) user = m.text
+      else if (m.role === 'assistant') answer = m.text
+    }
+    return user === null ? null : { user, answer }
+  } catch {
+    return null
+  }
+}
+
 function offReason(why: 'unavailable' | 'scheduled' | 'no-title'): string | null {
   return why === 'no-title' ? null : why
 }
@@ -148,7 +187,8 @@ const TEXT = {
     commandDescription: 'Show session auto-naming status (now · on · off) / 세션 이름 자동 짓기 상태 보기',
     off: '이 세션에서 이름 자동 짓기를 껐습니다.',
     on: '이름 자동 짓기를 다시 켰습니다. 지금 이름을 새 기준으로 삼습니다.',
-    now: '다음 메시지에 이름 안내를 한 번 붙입니다.',
+    now: '이름을 새로 짓는 중입니다. 바뀌면 알림이 뜹니다.',
+    nowLater: '대화 기록을 읽지 못했습니다. 다음 메시지의 턴이 끝나면 이름을 짓습니다.',
     usage: '쓰는 법: /session-name [now|on|off]',
     unknown: '확인 못 함',
     scheduled: '예약 작업 세션',
@@ -157,7 +197,10 @@ const TEXT = {
     status: '상태: ',
     statusOn: '켜짐',
     statusOff: '꺼짐',
-    queued: ', 다음 메시지에 안내 예약됨',
+    queued: ', 다음 턴 끝에 이름 짓기 예약됨',
+    usageLine: (u: NamerUsage) =>
+      `Haiku 호출 ${u.calls}번, 토큰 입력 ${u.input}·출력 ${u.output}·캐시 읽기 ${u.cacheRead}·캐시 쓰기 ${u.cacheWrite}`,
+    lastCall: (t: NamerTokens) => `마지막 호출: 입력 ${t.input}·출력 ${t.output}`,
     verdict: '지금 판정: ',
     lastTitle: '마지막으로 정한 이름: ',
     none: '없음',
@@ -169,7 +212,8 @@ const TEXT = {
     commandDescription: 'Show session auto-naming status (now · on · off) / 세션 이름 자동 짓기 상태 보기',
     off: 'Automatic session naming is off for this session.',
     on: 'Automatic naming is back on. The current title is the new baseline.',
-    now: 'A naming hint will be added to the next message, once.',
+    now: 'Naming this session now. A toast shows the new title.',
+    nowLater: 'Could not read the chat history. The title will be set when the next turn ends.',
     usage: 'Usage: /session-name [now|on|off]',
     unknown: 'unknown',
     scheduled: 'scheduled task session',
@@ -178,7 +222,10 @@ const TEXT = {
     status: 'Status: ',
     statusOn: 'on',
     statusOff: 'off',
-    queued: ', hint queued for the next message',
+    queued: ', naming queued for the end of the next turn',
+    usageLine: (u: NamerUsage) =>
+      `Haiku calls: ${u.calls}, tokens in ${u.input} · out ${u.output} · cache read ${u.cacheRead} · cache write ${u.cacheWrite}`,
+    lastCall: (t: NamerTokens) => `Last call: in ${t.input} · out ${t.output}`,
     verdict: 'Current verdict: ',
     lastTitle: 'Last title set: ',
     none: 'none',
@@ -195,7 +242,7 @@ async function applyTitle($: EngineInterface, raw: string, forced: boolean, lang
       await log($, 'skip', { reason: 'bad-title' })
       return
     }
-    const st = await read($, store)
+    const st = await readState($)
     if (title === st.lastSeenTitle || title === st.lastTitle) {
       await log($, 'same', { title })
       return
@@ -234,16 +281,79 @@ async function applyTitle($: EngineInterface, raw: string, forced: boolean, lang
   }
 }
 
+/** Haiku 에게 이름을 받아 적용한다. 기다리지 않고 부르므로 예외는 모두 안에서 잡는다. */
+async function nameWithModel($: EngineInterface, p: Pending, answer: string): Promise<void> {
+  try {
+    const { system, prompt } = buildNamingRequest(p.kind, p.lang, p.currentTitle, p.userText, answer)
+    let r: Awaited<ReturnType<EngineInterface['model']['complete']>>
+    try {
+      r = await $.model.complete({ model: 'haiku', system, prompt, effort: 'low', maxTokens: 1024, timeoutMs: 30000 })
+    } catch (e) {
+      // 막힌 모델 등 보내지도 못한 요청.
+      const reason = `model-unavailable: ${errMsg(e)}`.slice(0, 100)
+      await patch($, s => ({ ...s, off: 'model-unavailable' }))
+      await log($, 'off', { reason })
+      return
+    }
+    const u = r.usage
+    if (u) {
+      const t: NamerTokens = {
+        input: u.input_tokens ?? 0,
+        output: u.output_tokens ?? 0,
+        cacheRead: u.cache_read_input_tokens ?? 0,
+        cacheWrite: u.cache_creation_input_tokens ?? 0,
+      }
+      await patch($, s => ({
+        ...s,
+        usage: {
+          calls: s.usage.calls + 1,
+          input: s.usage.input + t.input,
+          output: s.usage.output + t.output,
+          cacheRead: s.usage.cacheRead + t.cacheRead,
+          cacheWrite: s.usage.cacheWrite + t.cacheWrite,
+          last: t,
+        },
+      }))
+    }
+    if (!r.isAnswered) {
+      const reason = `model: ${r.reason}${r.reason === 'api-error' && r.status !== null ? ` ${r.status}` : ''}`
+      await patch($, s => ({ ...s, modelFails: s.modelFails + 1 }))
+      await log($, 'error', { reason })
+      const st = await readState($)
+      if (st.modelFails >= MAX_MODEL_FAILS) {
+        await patch($, s => ({ ...s, off: 'model-failed' }))
+        await log($, 'off', { reason: 'model-failed' })
+      }
+      return
+    }
+    await patch($, s => ({ ...s, modelFails: 0 }))
+    const parsed = parseNamingReply(r.text)
+    if (parsed.kind === 'skip') {
+      await log($, 'skip', { reason: 'model-skip' })
+    } else if (parsed.kind === 'keep') {
+      await log($, 'same', { reason: 'model-keep' })
+    } else if (parsed.kind === 'bad') {
+      await log($, 'skip', { reason: 'bad-title' })
+    } else {
+      await applyTitle($, parsed.title, p.forced, p.lang)
+    }
+  } catch (err) {
+    try {
+      await log($, 'error', { reason: errMsg(err).slice(0, 120) })
+    } catch {
+      // 조용히 둔다.
+    }
+  }
+}
+
 export const register: Register = (on, options) => {
   // 이름 오래됨 점검 간격(메시지 수). 0 이면 끈다. 설정 메뉴에서 바꾸면 모듈이 다시 불러와진다.
   const every = recheckEvery(options?.['recheckEvery'])
-  // 이름·안내·알림 언어: 'auto' 면 사용자 메시지에서 읽고, 마지막으로 정한 언어를 기억한다(처음엔 ko).
+  // 이름·알림 언어: 'auto' 면 사용자 메시지에서 읽고, 마지막으로 정한 언어를 기억한다(처음엔 ko).
   const langOption = options?.['language']
   let lang: Lang = pickLang(langOption, null, 'ko')
-  // 이번 사용자 메시지에 안내를 붙였는가(그래야 답의 표시를 받아들인다).
-  let pendingHint = false
-  // 그 안내가 `/session-name now` 의 한 번이었는가.
-  let pendingForced = false
+  // 이번 사용자 메시지로 예약된 이름 짓기 건. 턴이 끝나면(turn.complete) 꺼내 쓴다.
+  let pending: Pending | null = null
   // 첫 사용자 메시지는 한 번 찾으면 바뀌지 않는다.
   let firstMessage: string | null = null
 
@@ -257,13 +367,12 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    // 사용자가 친 말에만 붙인다: 슬래시 명령·숨은 메시지는 건너뛴다.
+    // 사용자가 친 말만 본다: 슬래시 명령·숨은 메시지는 건너뛴다.
     if (e.command !== undefined || e.isMeta) return next(e)
-    pendingHint = false
-    pendingForced = false
+    pending = null
     lang = pickLang(langOption, e.text, lang)
     try {
-      const st0 = await read($, store)
+      const st0 = await readState($)
       const forced = st0.forceNext
       if (st0.off !== null && !forced) return next(e)
 
@@ -277,10 +386,10 @@ export const register: Register = (on, options) => {
         }
         return next(e)
       }
-      const st = await read($, store)
+      const st = await readState($)
       await patch($, s => ({ ...s, lastSeenTitle: cur.title }))
 
-      let attach = forced
+      let queue = forced
       let verdict: Verdict | null = null
       if (!forced) {
         // 한 번 찾으면 바뀌지 않는다. 읽기에 실패하면(false) 이번만 짧은 이름 규칙만 쓴다.
@@ -292,7 +401,6 @@ export const register: Register = (on, options) => {
         // 첫 메시지가 아직 기록에 없으면(이 메시지가 처음) 지금 메시지가 첫 메시지다.
         verdict = judge({
           title: cur.title,
-          // 기록에 아직 없으면(이 메시지가 처음) 지금 메시지가 첫 메시지다.
           firstMessage: first === false ? null : (first ?? e.text),
           lastTitle: st.lastTitle,
           promptsSinceSet: st.promptsSinceSet,
@@ -303,24 +411,24 @@ export const register: Register = (on, options) => {
           await log($, 'off', { reason: 'user-renamed' })
           return next(e)
         }
-        attach = verdict === 'first' || verdict === 'short' || verdict === 'stale'
-        // "ㅎㅇ"·"ㅇㅋ" 같은 짧은 말에는 주제가 없어 안내가 헛돈다. 다음 메시지로 미룬다.
-        if (attach && isTrivialMessage(e.text)) {
+        queue = verdict === 'first' || verdict === 'short' || verdict === 'stale'
+        // "ㅎㅇ"·"ㅇㅋ" 같은 짧은 말에는 주제가 없어 이름 짓기가 헛돈다. 다음 메시지로 미룬다.
+        if (queue && isTrivialMessage(e.text)) {
           await log($, 'skip', { reason: 'trivial' })
           return next(e)
         }
       }
-      if (!attach) return next(e)
+      if (!queue) return next(e)
 
-      pendingHint = true
-      pendingForced = forced
-      // 안내만 보고 이름을 안 지어도 다시 점검 간격만큼 뒤에 보게 한다(매번 붙이지 않게).
+      const kind: NameKind = forced ? 'now' : verdict === 'stale' ? 'stale' : verdict === 'short' ? 'short' : 'first'
+      pending = { kind, currentTitle: cur.title, userText: e.text, forced, lang }
+      // 이름을 안 지어도 다시 점검 간격만큼 뒤에 보게 한다(매번 짓지 않게).
       if (verdict === 'stale') await patch($, s => ({ ...s, promptsSinceSet: 0 }))
-      await log($, 'hint', { title: cur.title, reason: forced ? 'now' : (verdict ?? undefined) })
-      const kind: HintKind = forced ? 'now' : verdict === 'stale' ? 'stale' : verdict === 'short' ? 'short' : 'first'
-      return next({ ...e, context: [...(e.context ?? []), buildHint(cur.title, kind, lang)] })
+      await log($, 'queue', { title: cur.title, reason: kind })
+      // 0.5.0: 메시지에는 아무것도 붙이지 않는다. 이름은 턴이 끝난 뒤 Haiku 가 짓는다.
+      return next(e)
     } catch (err) {
-      pendingHint = false
+      pending = null
       try {
         await log($, 'error', { reason: errMsg(err).slice(0, 120) })
       } catch {
@@ -330,38 +438,16 @@ export const register: Register = (on, options) => {
     }
   })
 
-  on('session.append', async ($, e, next) => {
-    const m = e.message
-    // 메인 스레드의 assistant 줄만 본다.
-    if (e.agentId !== undefined || m.type !== 'assistant' || !Array.isArray(m.content)) return next(e)
-
-    let found: string | null = null
-    let changed = false
-    const blocks: typeof m.content = []
-    for (const b of m.content) {
-      if (b && b.type === 'text' && typeof b.text === 'string') {
-        const x = extractMarker(b.text)
-        if (x.found !== null) {
-          changed = true
-          if (found === null) found = x.found
-          // 글이 비면 다른 블록이 있을 때는 그 블록을 빼고, 하나뿐이면 빈 글로 둔다.
-          if (x.text === '' && m.content.length > 1) continue
-          blocks.push({ ...b, text: x.text })
-          continue
-        }
-      }
-      blocks.push(b)
-    }
-    if (!changed) return next(e)
-
-    const result = await next({ ...e, message: { ...m, content: blocks } })
-    if (found !== null && pendingHint) {
-      const raw = found
-      const forced = pendingForced
-      const lg = lang
-      pendingHint = false
+  on('turn.complete', async ($, e, next) => {
+    // 메인 루프의 턴 끝만 본다. 예약 건이 없으면 손대지 않는다.
+    if (e.agentId !== undefined || pending === null) return next(e)
+    const result = await next(e)
+    const p = pending
+    pending = null
+    // 답이 나온 턴만 짓는다. 끊기거나 거절·오류면 예약만 비우고 다음 메시지에서 다시 판정한다.
+    if (p !== null && e.reason === 'answer') {
       // 기다리지 않고 뒤에서 한다. 예외는 모두 잡는다.
-      void applyTitle($, raw, forced, lg).catch(() => {})
+      void nameWithModel($, p, e.answer).catch(() => {})
     }
     return result
   })
@@ -378,12 +464,24 @@ export const register: Register = (on, options) => {
       return { text: t.on }
     }
     if (arg === 'now') {
-      await patch($, s => ({ ...s, forceNext: true }))
+      // 다음 메시지를 기다리지 않고 바로 짓는다. 기록을 못 읽으면 다음 턴 끝으로 미룬다.
+      const ex = await readLastExchange($)
+      const cur = ex === null ? null : await readCurrentTitle($)
+      if (ex === null || cur === null || !cur.ok) {
+        await patch($, s => ({ ...s, forceNext: true }))
+        return { text: t.nowLater }
+      }
+      const l = pickLang(langOption, ex.user, lang)
+      void nameWithModel(
+        $,
+        { kind: 'now', currentTitle: cur.title, userText: ex.user, forced: true, lang: l },
+        ex.answer,
+      ).catch(() => {})
       return { text: t.now }
     }
     if (arg !== '') return { text: t.usage }
 
-    const st = await read($, store)
+    const st = await readState($)
     let judged: string = t.unknown
     const cur = await readCurrentTitle($)
     if (cur.ok) {
@@ -404,6 +502,8 @@ export const register: Register = (on, options) => {
       `${t.status}${st.off === null ? t.statusOn : `${t.statusOff} (${st.off})`}${st.forceNext ? t.queued : ''}`,
       `${t.verdict}${judged}`,
       `${t.lastTitle}${st.lastTitle ?? t.none}`,
+      t.usageLine(st.usage),
+      ...(st.usage.last ? [t.lastCall(st.usage.last)] : []),
       t.recent,
       ...(st.history.length === 0
         ? [t.nothingYet]

@@ -1,9 +1,9 @@
 {
   "name": "session-namer",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "license": "MIT",
   "author": { "name": "etehofk1-ops" },
-  "description": "Renames Claude desktop app sidebar sessions to match the conversation topic, with no extra model call.",
+  "description": "Renames Claude desktop app sidebar sessions to match the conversation topic, using one small Haiku call per naming.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "recheckEvery": {

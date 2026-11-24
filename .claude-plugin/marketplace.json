@@ -1,6 +1,6 @@
 {
   "name": "session-namer",
-  "description": "Renames Claude desktop app sidebar sessions to match the conversation topic, with no extra model call.",
+  "description": "Renames Claude desktop app sidebar sessions to match the conversation topic, using one small Haiku call per naming.",
   "owner": { "name": "etehofk1-ops" },
   "plugins": [{ "name": "session-namer", "source": "./" }]
 }
