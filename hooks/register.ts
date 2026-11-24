@@ -4,6 +4,8 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { NamerAction, NamerEntry, NamerState, NamerTokens, NamerUsage } from '../types'
 import {
   buildNamingRequest,
+  checkBeforeSet,
+  isAutoTitle,
   isRefusalResult,
   isScheduledSession,
   isToolError,
@@ -47,10 +49,13 @@ async function readState($: EngineInterface): Promise<NamerState> {
 /** prompt.submit 이 예약해 두고 turn.complete 가 꺼내 쓰는 이름 짓기 건. */
 type Pending = {
   kind: NameKind
+  /** 예약할 때 본 이름. 붙이기 직전에 이 이름에서 사람 손으로 바뀌었는지 본다. */
   currentTitle: string
   userText: string
   forced: boolean
   lang: Lang
+  /** 첫 사용자 메시지(모르면 null). 그사이 앱이 첫 마디 이름을 붙였는지 가릴 때 쓴다. */
+  firstMessage: string | null
 }
 
 type LooseResult = {
@@ -234,8 +239,9 @@ const TEXT = {
   },
 } as const
 
-/** 표시에서 뽑은 이름을 앱 도구로 적용한다. */
-async function applyTitle($: EngineInterface, raw: string, forced: boolean, lang: Lang): Promise<void> {
+/** Haiku 가 지은 이름을 앱 도구로 적용한다. 붙이기 직전에 꺼짐·지금 이름을 다시 본다. */
+async function applyTitle($: EngineInterface, raw: string, p: Pending): Promise<void> {
+  const { forced, lang } = p
   try {
     const title = sanitizeTitle(raw)
     if (title === null) {
@@ -243,7 +249,37 @@ async function applyTitle($: EngineInterface, raw: string, forced: boolean, lang
       return
     }
     const st = await readState($)
-    if (title === st.lastSeenTitle || title === st.lastTitle) {
+    // Haiku 를 기다리는 사이 /session-name off 를 했으면 붙이지 않는다(now 는 사람이 시킨 것이라 붙인다).
+    if (st.off !== null && !forced) {
+      await log($, 'skip', { reason: 'turned-off' })
+      return
+    }
+    // 예약한 뒤(긴 작업이면 몇 분 전) 사람이 이름을 바꿨으면 덮어쓰지 않는다.
+    const cur = await readCurrentTitle($)
+    if (!cur.ok) {
+      await log($, 'skip', { reason: 'title-unreadable' })
+      return
+    }
+    const check = checkBeforeSet({
+      now: cur.title,
+      expected: p.currentTitle,
+      lastTitle: st.lastTitle,
+      firstMessage: p.firstMessage,
+    })
+    if (check === 'skip') {
+      await log($, 'skip', { reason: 'title-changed' })
+      return
+    }
+    if (check === 'renamed') {
+      if (forced) {
+        await log($, 'skip', { reason: 'user-renamed' })
+      } else {
+        await patch($, s => ({ ...s, off: 'user-renamed' }))
+        await log($, 'off', { reason: 'user-renamed' })
+      }
+      return
+    }
+    if (title === cur.title || title === st.lastTitle) {
       await log($, 'same', { title })
       return
     }
@@ -335,7 +371,7 @@ async function nameWithModel($: EngineInterface, p: Pending, answer: string): Pr
     } else if (parsed.kind === 'bad') {
       await log($, 'skip', { reason: 'bad-title' })
     } else {
-      await applyTitle($, parsed.title, p.forced, p.lang)
+      await applyTitle($, parsed.title, p)
     }
   } catch (err) {
     try {
@@ -391,6 +427,7 @@ export const register: Register = (on, options) => {
 
       let queue = forced
       let verdict: Verdict | null = null
+      let firstKnown: string | null = firstMessage
       if (!forced) {
         // 한 번 찾으면 바뀌지 않는다. 읽기에 실패하면(false) 이번만 짧은 이름 규칙만 쓴다.
         let first: string | null | false = firstMessage
@@ -399,9 +436,10 @@ export const register: Register = (on, options) => {
           if (typeof first === 'string') firstMessage = first
         }
         // 첫 메시지가 아직 기록에 없으면(이 메시지가 처음) 지금 메시지가 첫 메시지다.
+        firstKnown = first === false ? null : (first ?? e.text)
         verdict = judge({
           title: cur.title,
-          firstMessage: first === false ? null : (first ?? e.text),
+          firstMessage: firstKnown,
           lastTitle: st.lastTitle,
           promptsSinceSet: st.promptsSinceSet,
           recheckEvery: every,
@@ -421,7 +459,7 @@ export const register: Register = (on, options) => {
       if (!queue) return next(e)
 
       const kind: NameKind = forced ? 'now' : verdict === 'stale' ? 'stale' : verdict === 'short' ? 'short' : 'first'
-      pending = { kind, currentTitle: cur.title, userText: e.text, forced, lang }
+      pending = { kind, currentTitle: cur.title, userText: e.text, forced, lang, firstMessage: firstKnown }
       // 이름을 안 지어도 다시 점검 간격만큼 뒤에 보게 한다(매번 짓지 않게).
       if (verdict === 'stale') await patch($, s => ({ ...s, promptsSinceSet: 0 }))
       await log($, 'queue', { title: cur.title, reason: kind })
@@ -456,11 +494,31 @@ export const register: Register = (on, options) => {
     const arg = e.args.trim().toLowerCase()
     const t = TEXT[lang]
     if (arg === 'off') {
+      // 이번 턴 끝에 지으려고 예약해 둔 것도 버린다.
+      pending = null
       await patch($, s => ({ ...s, off: 'manual', forceNext: false }))
       return { text: t.off }
     }
     if (arg === 'on') {
-      await patch($, s => ({ ...s, off: null, lastTitle: null, promptsSinceSet: 0 }))
+      // 지금 이름을 새 기준으로 삼는다. 사람이 정한 이름이면 모드가 지은 이름처럼 다룬다:
+      // recheckEvery 메시지마다 다시 보고, 사람이 또 바꾸면 다시 꺼진다.
+      // 첫 마디·짧은 이름이면 기준을 비워 두어 다음 메시지에서 짓게 한다.
+      const cur = await readCurrentTitle($)
+      let base: string | null = null
+      if (cur.ok) {
+        let first: string | null | false = firstMessage
+        if (first === null) first = await readFirstMessage($)
+        if (isAutoTitle(cur.title, first === false ? null : first) === null) base = cur.title
+      }
+      await patch($, s => ({
+        ...s,
+        off: null,
+        lastTitle: base,
+        lastSeenTitle: cur.ok ? cur.title : s.lastSeenTitle,
+        promptsSinceSet: 0,
+        // 연속 실패로 꺼졌던 경우 다시 세 번까지 기회를 준다.
+        modelFails: 0,
+      }))
       return { text: t.on }
     }
     if (arg === 'now') {
@@ -474,7 +532,7 @@ export const register: Register = (on, options) => {
       const l = pickLang(langOption, ex.user, lang)
       void nameWithModel(
         $,
-        { kind: 'now', currentTitle: cur.title, userText: ex.user, forced: true, lang: l },
+        { kind: 'now', currentTitle: cur.title, userText: ex.user, forced: true, lang: l, firstMessage },
         ex.answer,
       ).catch(() => {})
       return { text: t.now }

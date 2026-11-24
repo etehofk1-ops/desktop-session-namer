@@ -4,9 +4,11 @@ import {
   ANSWER_EXCERPT,
   USER_EXCERPT,
   buildNamingRequest,
+  checkBeforeSet,
   excerpt,
   hasHangul,
   isAutoTitle,
+  looksSensitive,
   isRefusalResult,
   isScheduledSession,
   isToolError,
@@ -83,6 +85,47 @@ test('pickLang: ko·en 은 그대로, auto 는 한글 → ko, 라틴 → en, 아
   expect(pickLang('auto', '12345 !!!', 'en')).toBe('en')
   expect(pickLang('auto', '', 'en')).toBe('en')
   expect(pickLang(undefined, 'Fix the login bug', 'ko')).toBe('en')
+})
+
+test('looksSensitive·sanitizeTitle: 키·토큰·메일 주소처럼 보이는 이름은 버린다', async () => {
+  for (const t of [
+    'sk-ant-api03 키 오류 수정',
+    'Fix ghp_abcdEFGH1234 token',
+    'AKIAIOSFODNN7 권한 오류',
+    'a1b2c3d4e5f6a7b8c9 해시 확인',
+    'me@example.com 로그인 오류',
+  ]) {
+    expect(looksSensitive(t)).toBe(true)
+    expect(sanitizeTitle(t)).toBe(null)
+  }
+  // 보통 이름은 그대로 쓴다.
+  for (const t of [
+    'Internationalization setup',
+    'SHA256 checksum mismatch',
+    'Node 22 업그레이드',
+    'desk-top 배치 정리',
+    '로그인 오류 원인 찾기',
+  ]) {
+    expect(looksSensitive(t)).toBe(false)
+    expect(sanitizeTitle(t)).toBe(t)
+  }
+})
+
+test('checkBeforeSet: 그대로면 apply, 앱이 첫 마디 이름을 붙였으면 apply, 사람이 바꿨으면 renamed', async () => {
+  const first = '사진 앨범 공유 페이지 만들자'
+  // 예약할 때 본 이름 그대로
+  expect(checkBeforeSet({ now: 'ᄒᄋ', expected: 'ᄒᄋ', lastTitle: null, firstMessage: 'ㅎㅇ' })).toBe('apply')
+  // 앱이 그사이 첫 마디 이름을 붙였다(모드는 아직 지은 적 없음)
+  expect(checkBeforeSet({ now: first, expected: '새 창', lastTitle: null, firstMessage: first })).toBe('apply')
+  // 사람이 바꿨다
+  expect(checkBeforeSet({ now: '내가 정한 이름', expected: 'ᄒᄋ', lastTitle: null, firstMessage: 'ㅎㅇ' })).toBe('renamed')
+  expect(
+    checkBeforeSet({ now: '내가 정한 이름', expected: '사진 앨범 공유', lastTitle: '사진 앨범 공유', firstMessage: first }),
+  ).toBe('renamed')
+  // 그사이 모드가 다른 이름을 붙였다(now 등): 이번 건만 버린다
+  expect(
+    checkBeforeSet({ now: '앨범 공유 개선', expected: '사진 앨범 공유', lastTitle: '앨범 공유 개선', firstMessage: first }),
+  ).toBe('skip')
 })
 
 test('sanitizeTitle: 끝 괄호는 남긴다', async () => {
@@ -679,7 +722,8 @@ test('짧은 메시지 다음의 긴 메시지에서만 모델을 부른다', as
   expect(r.calls.length).toBe(0)
   await turn($, '사진 앨범 공유 페이지 만들자')
   expect(r.calls.length).toBe(1)
-  expect(r.gets).toBe(2)
+  // 메시지마다 한 번, 이름을 붙이기 직전에 한 번 더 읽는다.
+  expect(r.gets).toBe(3)
 })
 
 test('메시지 기록을 못 읽으면 짧은 이름 규칙만 쓴다(짧으면 지음)', async ($, on) => {
@@ -799,6 +843,94 @@ test('/session-name off 뒤에는 예약도 도구 호출도 없다', async ($, 
   expect(r.calls.length).toBe(1)
 })
 
+// ---------- 0.5.1: 붙이기 직전 다시 보기, on 기준 ----------
+
+test('턴 도중 사람이 이름을 바꾸면 턴이 끝나도 덮어쓰지 않고 끈다', async ($, on) => {
+  let title = 'ᄒᄋ'
+  const r = await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
+  await say($, '앨범 공유 페이지 시작하자')
+  title = '내가 정한 이름' // 긴 작업 도중 사이드바에서 바꿨다
+  await finish($)
+  expect(r.sets).toEqual([])
+  expect(r.toasts).toEqual([])
+  const s = await cmd($, '')
+  expect(s).toContain('꺼짐 (user-renamed)')
+  // 이후 메시지에서도 건드리지 않는다.
+  await turn($, '다음 일을 해 보자')
+  expect(r.sets).toEqual([])
+})
+
+test('턴 도중 앱이 첫 마디 이름을 붙인 경우는 그대로 짓는다', async ($, on) => {
+  const first = '사진 앨범 공유 페이지 만들자'
+  let title = '새 창'
+  const r = await rig($, on, { title: () => title, history: [] })
+  await say($, first)
+  title = first // 앱이 첫 메시지로 이름을 붙였다
+  await finish($)
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+})
+
+test('턴 도중 /session-name off → 그 턴 끝에 Haiku 를 부르지 않는다', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'] })
+  await say($, '앨범 공유 페이지 시작하자')
+  await cmd($, 'off')
+  await finish($)
+  expect(r.calls.length).toBe(0)
+  expect(r.sets).toEqual([])
+})
+
+test('Haiku 를 기다리는 사이 꺼지면 붙이지 않는다', async ($, on) => {
+  const r = await rig($, on, {
+    title: () => 'ᄒᄋ',
+    history: ['ㅎㅇ'],
+    reply: () => {
+      // 답이 돌아오는 사이 사람이 끈다.
+      void cmd($, 'off')
+      return ans('사진 앨범 공유 페이지')
+    },
+  })
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(r.calls.length).toBe(1)
+  expect(r.sets).toEqual([])
+  expect(await cmd($, '')).toContain('skip (turned-off)')
+})
+
+test('on: 사람이 정한 이름을 새 기준으로 삼아 30개째에 다시 보고, 또 바꾸면 다시 끈다', async ($, on) => {
+  let title = 'ᄒᄋ'
+  const r = await rig($, on, {
+    title: () => title,
+    history: ['ㅎㅇ'],
+    reply: n => ans(n === 0 ? '사진 앨범 공유 페이지' : 'KEEP'),
+  })
+  await turn($, '앨범 공유 페이지 시작하자')
+  title = '내가 정한 이름'
+  await turn($, '다음 일을 해 보자')
+  expect(await cmd($, '')).toContain('user-renamed')
+  expect(await cmd($, 'on')).toContain('새 기준')
+  expect(await cmd($, '')).toContain('마지막으로 정한 이름: 내가 정한 이름')
+  for (let i = 0; i < 29; i++) await turn($, `일 ${i}번째 작업 진행`)
+  expect(r.calls.length).toBe(1)
+  await turn($, '서른째 작업 진행해 보자')
+  expect(r.calls.length).toBe(2)
+  expect(r.calls[1].system).toContain('«내가 정한 이름»')
+  expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+  title = '또 바꾼 이름'
+  await turn($, '다음 일을 또 해 보자')
+  expect(await cmd($, '')).toContain('꺼짐 (user-renamed)')
+})
+
+test('on: 첫 마디 이름이면 기준을 비워 다음 메시지에서 짓고, 연속 실패 수도 비운다', async ($, on) => {
+  const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], reply: () => fail() })
+  for (let i = 0; i < 3; i++) await turn($, `앨범 공유 페이지 ${i}번째 시도`)
+  expect(await cmd($, '')).toContain('model-failed')
+  await cmd($, 'on')
+  expect(await cmd($, '')).toContain('마지막으로 정한 이름: 없음')
+  // 한 번 더 실패해도 바로 꺼지지 않는다(세 번까지).
+  await turn($, '앨범 공유 페이지 다시 시도')
+  expect(r.calls.length).toBe(4)
+  expect((await cmd($, '')).split('\n')[0]).toContain('켜짐')
+})
+
 test('앱이 거절하면 이 세션에서는 끈다', async ($, on) => {
   const r = await rig($, on, { title: () => 'ᄒᄋ', history: ['ㅎㅇ'], setText: 'User declined the title change' })
   await turn($, '앨범 공유 페이지 시작하자')
@@ -852,12 +984,13 @@ test('0.4.0 상태(state-v2)를 이어 읽는다: 끈 세션은 꺼진 채, 토�
   await turn($, '댓글 기능도 붙여 줘')
   expect(r.calls.length).toBe(0)
   expect(r.gets).toBe(g0)
-  // 켜면 같은 태그로 쓰고, 0.4.0 기록은 남기고 새 칸을 채운다(lastTitle 비우기는 on 의 원래 동작).
+  // 켜면 같은 태그로 쓰고, 0.4.0 기록은 남기고 새 칸을 채운다.
+  // 0.5.1: on 은 지금 이름(사람이 정한 이름)을 새 기준으로 lastTitle 에 둔다.
   expect(await cmd($, 'on')).toContain('켰')
   const w = db.stored()
   expect(w.shape).toBe('state-v2')
   expect(w.value.off).toBe(null)
-  expect(w.value.lastTitle).toBe(null)
+  expect(w.value.lastTitle).toBe('사진 앨범 공유 페이지')
   expect(w.value.lastSeenTitle).toBe('사진 앨범 공유 페이지')
   expect(w.value.history.map((h: any) => h.action)).toEqual(['hint', 'set'])
   expect(w.value.modelFails).toBe(0)

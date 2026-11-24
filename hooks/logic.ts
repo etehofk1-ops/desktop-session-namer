@@ -61,7 +61,18 @@ export function sanitizeTitle(raw: string): string | null {
   t = t.replace(WRAPPERS, '').trim()
   const len = [...t].length
   if (len < MIN_LEN || len > MAX_LEN) return null
+  if (looksSensitive(t)) return null
   return t
+}
+
+// 사이드바 이름은 화면 공유·캡처에 그대로 보인다. 키·메일 주소처럼 보이는 이름은 쓰지 않는다.
+const KEY_PREFIX = /(?:^|[^A-Za-z0-9])(?:sk-|sk_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abposr]-|AKIA|AIza)/
+const EMAIL = /[^\s@]+@[^\s@]+\.[^\s@]+/
+
+/** 이름에 키·토큰·메일 주소처럼 보이는 글이 있는가. 16자 이상 한 덩어리에 글자와 숫자가 섞이면 키로 본다. */
+export function looksSensitive(title: string): boolean {
+  if (KEY_PREFIX.test(title) || EMAIL.test(title)) return true
+  return title.split(/\s+/).some(w => [...w].length >= 16 && /\d/.test(w) && /[A-Za-z]/.test(w))
 }
 
 /** 도구 호출 자체가 오류·거부인가(본문 글은 보지 않는다). get_session 처럼 본문에 제목이 든 결과에 쓴다. */
@@ -149,6 +160,26 @@ export function judge(args: {
     return every > 0 && promptsSinceSet >= every ? 'stale' : 'own'
   }
   return isAutoTitle(title, firstMessage) ?? 'none'
+}
+
+/**
+ * 이름을 붙이기 직전에 지금 이름을 다시 보고 정한다. 이름 짓기는 메시지를 보낼 때 예약되고
+ * 턴이 끝난 뒤(Haiku 답을 받은 뒤) 붙으므로, 그사이 사람이 이름을 바꿨을 수 있다.
+ * - 'apply': 예약할 때 본 이름(expected) 그대로이거나, 모드가 아직 이름을 지은 적이 없고
+ *   지금 이름이 첫 마디·짧은 이름이다(앱이 첫 마디 이름을 그사이 붙인 경우).
+ * - 'skip': 그사이 모드가 다른 이름을 붙였다(/session-name now 등). 이번 건만 버린다.
+ * - 'renamed': 사람이 바꿨다. 덮어쓰지 않는다.
+ */
+export function checkBeforeSet(args: {
+  now: string
+  expected: string
+  lastTitle: string | null
+  firstMessage: string | null
+}): 'apply' | 'skip' | 'renamed' {
+  const { now, expected, lastTitle, firstMessage } = args
+  if (now === expected) return 'apply'
+  if (lastTitle !== null) return now === lastTitle ? 'skip' : 'renamed'
+  return isAutoTitle(now, firstMessage) !== null ? 'apply' : 'renamed'
 }
 
 export type NameKind = 'first' | 'short' | 'stale' | 'now'
