@@ -182,9 +182,10 @@ export function judge(args: {
  * 이름을 붙이기 직전에 지금 이름을 다시 보고 정한다. 이름 짓기는 메시지를 보낼 때 예약되고
  * 턴이 끝난 뒤(Haiku 답을 받은 뒤) 붙으므로, 그사이 사람이 이름을 바꿨을 수 있다.
  * - 'apply': 예약할 때 본 이름(expected) 그대로이거나, 모드가 아직 이름을 지은 적이 없고
- *   지금 이름이 첫 마디·짧은 이름이다(앱이 첫 마디 이름을 그사이 붙인 경우).
- * - 'skip': 그사이 모드가 다른 이름을 붙였다(/session-name now 등). 이번 건만 버린다.
- * - 'renamed': 사람이 바꿨다. 덮어쓰지 않는다.
+ *   지금 이름이 첫 마디 이름이다(앱이 첫 마디 이름을 그사이 붙인 경우).
+ * - 'skip': 그사이 모드가 다른 이름을 붙였거나(/session-name now 등), 첫 메시지를 몰라
+ *   누가 바꿨는지 가리지 못한다. 이번 건만 버린다.
+ * - 'renamed': 사람이 바꿨다. "DB"처럼 짧은 이름이어도 덮어쓰지 않는다.
  */
 export function checkBeforeSet(args: {
   now: string
@@ -195,7 +196,8 @@ export function checkBeforeSet(args: {
   const { now, expected, lastTitle, firstMessage } = args
   if (now === expected) return 'apply'
   if (lastTitle !== null) return now === lastTitle ? 'skip' : 'renamed'
-  return isAutoTitle(now, firstMessage) !== null ? 'apply' : 'renamed'
+  if (firstMessage === null) return 'skip'
+  return isAutoTitle(now, firstMessage) === 'first' ? 'apply' : 'renamed'
 }
 
 /**
@@ -288,20 +290,22 @@ export function buildNamingRequest(
   userText: string,
   answer: string,
 ): { system: string; prompt: string } {
+  // 지금 이름도 Haiku 에 간다. 앱이 붙인 첫 마디 이름에 키가 들어 있을 수 있어 같이 가린다.
+  const shown = maskSensitive(currentTitle)
   let system: string
   if (lang === 'en') {
     system = SYS_EN
     if (kind === 'stale') {
-      system += ` The current title is «${currentTitle}». If the chat has not moved on to a different task, reply KEEP.`
+      system += ` The current title is «${shown}». If the chat has not moved on to a different task, reply KEEP.`
     } else if (kind === 'now') {
-      system += ` The current title is «${currentTitle}». Write a better one.`
+      system += ` The current title is «${shown}». Write a better one.`
     }
   } else {
     system = SYS_KO
     if (kind === 'stale') {
-      system += ` 지금 이름은 «${currentTitle}»이다. 대화가 다른 일로 넘어가지 않았으면 KEEP이라고만 답한다.`
+      system += ` 지금 이름은 «${shown}»이다. 대화가 다른 일로 넘어가지 않았으면 KEEP이라고만 답한다.`
     } else if (kind === 'now') {
-      system += ` 지금 이름은 «${currentTitle}»이다. 더 맞는 새 이름을 짓는다.`
+      system += ` 지금 이름은 «${shown}»이다. 더 맞는 새 이름을 짓는다.`
     }
   }
   const u = maskSensitive(stripTags(excerpt(userText, USER_EXCERPT)))

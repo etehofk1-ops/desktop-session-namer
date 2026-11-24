@@ -15,7 +15,7 @@ In the Claude desktop app (Code tab), a session's sidebar title often stays stuc
   - Messages of four characters or fewer, like "hi" or "ok", have no topic, so they are skipped.
 - When the reply finishes, the mod sends Haiku the first 1,000 characters of your message and the first 800 characters of the reply in one low-effort call, and asks for a title. It renames the session with the app's `set_session_title` tool. A toast tells you the new title.
 - Nothing is added to your conversation. Claude never sees a hint and never writes a hidden line.
-- Haiku gets only those two excerpts, sent to Anthropic through your session's own login. Nothing goes anywhere else. Before sending, the mod replaces anything in the excerpts that looks like a key, a token or an email address with `[redacted]`. If the title Haiku returns still contains something like that, the mod does not use it.
+- Haiku gets only those two excerpts, sent to Anthropic through your session's own login. Nothing goes anywhere else. Before sending, the mod replaces anything in the excerpts and in the current title that looks like a key, a token or an email address with `[redacted]`. It finds common key formats and email addresses by their shape. It is not a full secret scanner, so a password or personal detail in some other form is sent as is. If the title Haiku returns still contains something like that, the mod does not use it.
 - After it names a session, the mod asks Haiku again every 30 messages whether the conversation has moved on to something else. Haiku answers KEEP unless the topic changed. You can change the interval, or set it to 0 to turn this off.
 - Titles follow the language of the conversation, English or Korean (setting `language`).
 - The mod stays out of the way when:

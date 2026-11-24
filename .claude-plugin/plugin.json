@@ -1,6 +1,6 @@
 {
   "name": "session-namer",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "license": "MIT",
   "author": { "name": "etehofk1-ops" },
   "description": "Renames Claude desktop app sidebar sessions to match the conversation topic, using one small Haiku call per naming.",

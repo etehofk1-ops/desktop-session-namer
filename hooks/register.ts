@@ -290,6 +290,11 @@ async function applyTitle($: EngineInterface, raw: string, p: Pending): Promise<
       await log($, 'same', { title })
       return
     }
+    // 지금 이름을 읽는 사이 off 를 했을 수 있어 붙이기 바로 앞에서 한 번 더 본다.
+    if (p.cancelled()) {
+      await log($, 'skip', { reason: 'turned-off' })
+      return
+    }
     let setResult: LooseResult
     try {
       setResult = (await $.tool.call({ tool: SET, session_id: 'self', title })) as LooseResult

@@ -128,6 +128,12 @@ test('checkBeforeSet: 그대로면 apply, 앱이 첫 마디 이름을 붙였으�
   expect(checkBeforeSet({ now: first, expected: '새 창', lastTitle: null, firstMessage: first })).toBe('apply')
   // 사람이 바꿨다
   expect(checkBeforeSet({ now: '내가 정한 이름', expected: 'ᄒᄋ', lastTitle: null, firstMessage: 'ㅎㅇ' })).toBe('renamed')
+  // 모드가 짓기 전에 짧게 바꿨어도 사람이 바꾼 것이다(0.5.3)
+  expect(checkBeforeSet({ now: 'DB', expected: 'ᄒᄋ', lastTitle: null, firstMessage: 'ㅎㅇ' })).toBe('renamed')
+  // 첫 메시지를 모르면 누가 바꿨는지 가리지 못하니 이번 건만 버린다
+  expect(checkBeforeSet({ now: 'DB', expected: 'ᄒᄋ', lastTitle: null, firstMessage: null })).toBe('skip')
+  // 앱이 첫 마디를 호환 자모로 바꿔 붙인 것은 짓는다
+  expect(checkBeforeSet({ now: 'ᄒᄋ', expected: '새 창', lastTitle: null, firstMessage: 'ㅎㅇ' })).toBe('apply')
   expect(
     checkBeforeSet({ now: '내가 정한 이름', expected: '사진 앨범 공유', lastTitle: '사진 앨범 공유', firstMessage: first }),
   ).toBe('renamed')
@@ -335,6 +341,17 @@ test('buildNamingRequest: Haiku 로 보내는 발췌에서 키·메일 주소를
   expect(r.prompt).toContain('[redacted] 키로 접속이 안 돼')
   expect(r.prompt).toContain('토큰 [redacted] 를')
   for (const s of ['sk-ant', 'me@example.com', 'ghp_']) expect(r.prompt.includes(s)).toBe(false)
+})
+
+test('buildNamingRequest: stale·now 의 지금 이름도 가린다(0.5.3)', async () => {
+  const title = 'sk-ant-api03-abcDEF123 키 오류'
+  for (const kind of ['stale', 'now'] as const) {
+    for (const lang of ['ko', 'en'] as const) {
+      const r = buildNamingRequest(kind, lang, title, 'x', 'y')
+      expect(r.system).toContain('«[redacted] 키 오류»')
+      expect(r.system.includes('sk-ant')).toBe(false)
+    }
+  }
 })
 
 test('parseNamingReply: SKIP·KEEP·이름·빈 글', async () => {
@@ -1031,6 +1048,37 @@ test('now 를 시킨 뒤 Haiku 를 기다리는 사이 off 하면 붙이지 않�
   await cmd($, 'now')
   expect(r.calls.length).toBe(2)
   expect(r.sets).toEqual(['사진 앨범 공유 페이지'])
+})
+
+// ---------- 0.5.3: 짓기 전 턴 도중 짧은 이름, 다시 읽는 사이 off ----------
+
+test('모드가 짓기 전, 턴 도중 사람이 짧은 이름으로 바꾸면 턴 끝에 덮어쓰지 않고 끈다', async ($, on) => {
+  let title = 'ᄒᄋ'
+  const r = await rig($, on, { title: () => title, history: ['ㅎㅇ'] })
+  await say($, '데이터베이스 색인을 정리하자')
+  title = 'DB' // 긴 작업 도중 사이드바에서 짧게 바꿨다
+  await finish($)
+  expect(r.calls.length).toBe(1)
+  expect(r.sets).toEqual([])
+  expect(await cmd($, '')).toContain('꺼짐 (user-renamed)')
+})
+
+test('붙이기 직전 지금 이름을 읽는 사이 off 하면 붙이지 않는다', async ($, on) => {
+  let reads = 0
+  const r = await rig($, on, {
+    title: () => {
+      reads++
+      // 1번째는 메시지를 보낼 때, 2번째는 붙이기 직전 다시 읽을 때. 그 사이 사람이 끈다.
+      if (reads === 2) void cmd($, 'off')
+      return 'ᄒᄋ'
+    },
+    history: ['ㅎㅇ'],
+  })
+  await turn($, '앨범 공유 페이지 시작하자')
+  expect(reads).toBe(2)
+  expect(r.calls.length).toBe(1)
+  expect(r.sets).toEqual([])
+  expect(await cmd($, '')).toContain('skip (turned-off)')
 })
 
 test('앱이 거절하면 이 세션에서는 끈다', async ($, on) => {
