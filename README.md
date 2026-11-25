@@ -97,6 +97,28 @@ You don't need any of these for normal use.
 | `recheckEvery` | 30 | How many messages after naming before it checks the title again. 0 turns rechecking off. |
 | `language` | `auto` | Title language. `auto` uses Korean if your message contains Hangul and English otherwise, Japanese or Chinese messages included. Set `en` or `ko` to fix it. |
 
+## FAQ
+
+### How do I automatically rename sessions in the Claude desktop app?
+
+Install session-namer (see Install above). From then on, a session whose title is still your first message, or three characters or shorter, gets a title that matches the topic when Claude's reply finishes. There is no command to run.
+
+### Does it use extra tokens?
+
+One small Haiku call per title. Measured calls used 183–2,126 input tokens and 9–30 output tokens, about $0.00002–0.00023 each (November 25, 2026; see What it costs). Nothing is added to your conversation, so Claude's own context does not grow.
+
+### Will it overwrite a title I set myself?
+
+No. When it sees a title you changed, it turns itself off for that session. It also reads the title once more right before renaming.
+
+### Does it work in the terminal CLI?
+
+No. It needs the app tools of the desktop app's Code tab, so it turns itself off in the terminal. For titles in the terminal's `claude --resume` list, the CLI tools in the comparison above are a better fit.
+
+### What does Haiku see?
+
+Only the first 1,000 characters of your last message and the first 800 characters of the reply, sent to Anthropic through your session's own login. Text that looks like a key, a token or an email address is replaced with `[redacted]` before sending.
+
 ## Limitations
 
 - Haiku sees only the latest exchange: the first 1,000 characters of your last message and the first 800 of the reply. A recheck that lands on a short detour may rename the session after the detour.
