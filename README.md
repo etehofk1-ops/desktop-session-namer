@@ -69,6 +69,16 @@ In a terminal:
 /plugin install session-namer --marketplace etehofk1-ops/desktop-session-namer
 ```
 
+## Like it?
+
+Give it a try, and if it saves you some renaming, please [star the repo](https://github.com/etehofk1-ops/desktop-session-namer). It helps other people find the mod.
+
+You don't even have to go click it. Just ask Claude to "star etehofk1-ops/desktop-session-namer on GitHub". If the GitHub CLI (`gh`) is logged in, Claude can do it with this one command:
+
+```
+gh api -X PUT user/starred/etehofk1-ops/desktop-session-namer
+```
+
 ## Commands
 
 You don't need any of these for normal use.

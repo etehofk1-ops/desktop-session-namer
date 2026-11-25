@@ -69,6 +69,16 @@ Claude Code 2.1.308부터는 훅의 `sessionTitle`로 돌려준 이름도 로컬
 /plugin install session-namer --marketplace etehofk1-ops/desktop-session-namer
 ```
 
+## 마음에 들면
+
+써 보고 세션 이름 짓는 수고를 덜었다면 [저장소](https://github.com/etehofk1-ops/desktop-session-namer)에 스타를 눌러 주세요. 다른 사람이 이 모드를 찾는 데 도움이 됩니다.
+
+직접 누르러 갈 필요도 없습니다. Claude에게 "etehofk1-ops/desktop-session-namer 저장소에 스타 눌러 줘"라고만 하면 됩니다. GitHub CLI(`gh`)에 로그인돼 있으면 Claude가 아래 명령 한 줄로 대신 눌러 줍니다.
+
+```
+gh api -X PUT user/starred/etehofk1-ops/desktop-session-namer
+```
+
 ## 명령
 
 평소에는 쓸 일이 없습니다.
